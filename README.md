@@ -6,7 +6,9 @@ browse, filter, and export them as CSV.
 
 - Webhook receiver with RSA signature verification (one URL per mail server)
 - Multi-tenant: clients → mail servers → events
-- Google OAuth login (domain-restricted) for staff and optional client users
+- Built-in email + password login. Bootstrap admin is seeded from env on
+  first boot; further users are invited by an admin who sets their initial
+  password and hands it out of band.
 - 90/120-day retention on raw events, forever-retained daily stats + suppression list
 - Single Node.js container, SQLite on disk, Caddy in front for automatic HTTPS
 
@@ -25,7 +27,7 @@ sudo usermod -aG docker $USER && newgrp docker
 git clone <this-repo> postal-logs
 cd postal-logs
 cp .env.example .env
-nano .env   # set HOSTNAME, GOOGLE_*, SESSION_SECRET, ALLOWED_DOMAIN
+nano .env   # set HOSTNAME, ACME_EMAIL, SESSION_SECRET, BOOTSTRAP_ADMIN_*
 
 # 3. start
 docker compose up -d
@@ -34,24 +36,26 @@ docker compose logs -f
 
 That's it. Caddy will provision a Let's Encrypt cert automatically the first
 time someone hits the hostname. Open `https://<your-hostname>/` and sign in
-with Google.
+with the bootstrap admin email + password from `.env`.
 
 ## What you set in `.env`
 
 | Variable | Meaning |
 |---|---|
 | `HOSTNAME` | e.g. `postal-logs.colada.ag` — Caddy uses this for SSL |
-| `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET` | from Google Cloud Console, OAuth 2.0 Client |
-| `ALLOWED_DOMAIN` | only emails on this domain can log in (e.g. `colada.ag`); leave blank to allow any address you've pre-invited |
+| `ACME_EMAIL` | contact email for Let's Encrypt |
 | `SESSION_SECRET` | a long random string (`openssl rand -hex 32`) |
-| `BOOTSTRAP_ADMIN_EMAIL` | the first time the app starts, this email becomes the initial internal-staff admin |
+| `BOOTSTRAP_ADMIN_EMAIL` | seeded as the first internal-staff admin on first boot |
+| `BOOTSTRAP_ADMIN_PASSWORD` | initial password for the bootstrap admin (≥ 12 chars). Remove from `.env` after first sign-in. |
 
-Google OAuth callback URL to configure in Google Cloud Console:
-`https://<HOSTNAME>/auth/google/callback`
+The bootstrap pair is only used when the users table is empty. After that,
+new users are created from **Admin → Users** with an initial password set
+by the admin; users can change their own password from the header menu.
 
 ## First-time setup in the UI
 
-1. Sign in with `BOOTSTRAP_ADMIN_EMAIL`.
+1. Sign in at `https://<HOSTNAME>/` with `BOOTSTRAP_ADMIN_EMAIL` and
+   `BOOTSTRAP_ADMIN_PASSWORD`.
 2. Go to **Admin → Clients**, create a client.
 3. Go to **Admin → Mail Servers** under that client, create a mail server.
    The app generates a unique webhook URL and asks for the Postal server's

@@ -268,7 +268,14 @@ function MailServerRow({ server: m, revealed, onRotate, onDelete }) {
 function Users() {
   const [users, setUsers] = useState([]);
   const [clients, setClients] = useState([]);
-  const [newUser, setNewUser] = useState({ email: '', name: '', isStaff: false });
+  const [newUser, setNewUser] = useState({
+    email: '',
+    name: '',
+    isStaff: false,
+    password: '',
+  });
+  const [inviteError, setInviteError] = useState(null);
+  const [resettingId, setResettingId] = useState(null);
 
   async function refresh() {
     setUsers(await api.adminUsers());
@@ -280,10 +287,29 @@ function Users() {
 
   async function invite(e) {
     e.preventDefault();
+    setInviteError(null);
     if (!newUser.email) return;
-    await api.adminUpsertUser(newUser);
-    setNewUser({ email: '', name: '', isStaff: false });
-    refresh();
+    if (!newUser.password || newUser.password.length < 12) {
+      setInviteError('Initial password must be at least 12 characters.');
+      return;
+    }
+    try {
+      await api.adminUpsertUser(newUser);
+      setNewUser({ email: '', name: '', isStaff: false, password: '' });
+      refresh();
+    } catch (err) {
+      setInviteError(err.message);
+    }
+  }
+
+  async function resetPassword(userId, password) {
+    try {
+      await api.adminResetPassword(userId, password);
+      setResettingId(null);
+      refresh();
+    } catch (err) {
+      alert('Reset failed: ' + err.message);
+    }
   }
 
   async function addMembership(userId, clientId, role) {
@@ -303,25 +329,42 @@ function Users() {
 
   return (
     <div className="space-y-5">
-      <form onSubmit={invite} className="bg-panel border border-border rounded-lg p-4 grid grid-cols-1 md:grid-cols-4 gap-2">
-        <input
-          type="email"
-          placeholder="email@example.com"
-          value={newUser.email}
-          onChange={(e) => setNewUser({ ...newUser, email: e.target.value })}
-          className="bg-bg border border-border rounded-md px-3 py-2 text-sm md:col-span-2"
-        />
-        <label className="flex items-center gap-2 text-sm">
+      <form onSubmit={invite} className="bg-panel border border-border rounded-lg p-4 space-y-2">
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
           <input
-            type="checkbox"
-            checked={newUser.isStaff}
-            onChange={(e) => setNewUser({ ...newUser, isStaff: e.target.checked })}
+            type="email"
+            placeholder="email@example.com"
+            value={newUser.email}
+            onChange={(e) => setNewUser({ ...newUser, email: e.target.value })}
+            className="bg-bg border border-border rounded-md px-3 py-2 text-sm"
+            required
           />
-          internal staff
-        </label>
-        <button className="px-4 py-2 rounded bg-accent text-bg text-sm font-medium">
-          Invite
-        </button>
+          <input
+            type="text"
+            placeholder="Initial password (≥ 12 chars; share out of band)"
+            value={newUser.password}
+            onChange={(e) => setNewUser({ ...newUser, password: e.target.value })}
+            className="bg-bg border border-border rounded-md px-3 py-2 text-sm font-mono"
+            required
+            minLength={12}
+          />
+        </div>
+        <div className="flex items-center justify-between gap-2">
+          <label className="flex items-center gap-2 text-sm">
+            <input
+              type="checkbox"
+              checked={newUser.isStaff}
+              onChange={(e) => setNewUser({ ...newUser, isStaff: e.target.checked })}
+            />
+            internal staff
+          </label>
+          <button className="px-4 py-2 rounded bg-accent text-bg text-sm font-medium">
+            Invite
+          </button>
+        </div>
+        {inviteError && (
+          <div className="text-xs text-bad">{inviteError}</div>
+        )}
       </form>
 
       {users.map((u) => (
@@ -342,13 +385,27 @@ function Users() {
                 </div>
               )}
             </div>
-            <button
-              onClick={() => toggleStaff(u)}
-              className="text-xs px-2 py-1 rounded bg-border hover:bg-border/70"
-            >
-              {u.isStaff ? 'demote to regular user' : 'promote to staff'}
-            </button>
+            <div className="flex items-center gap-1">
+              <button
+                onClick={() => setResettingId(resettingId === u.id ? null : u.id)}
+                className="text-xs px-2 py-1 rounded bg-border hover:bg-border/70"
+              >
+                {resettingId === u.id ? 'cancel reset' : 'reset password'}
+              </button>
+              <button
+                onClick={() => toggleStaff(u)}
+                className="text-xs px-2 py-1 rounded bg-border hover:bg-border/70"
+              >
+                {u.isStaff ? 'demote to regular user' : 'promote to staff'}
+              </button>
+            </div>
           </div>
+          {resettingId === u.id && (
+            <ResetPasswordForm
+              onCancel={() => setResettingId(null)}
+              onSubmit={(pw) => resetPassword(u.id, pw)}
+            />
+          )}
           {!u.isStaff && (
             <div className="mt-3 space-y-1.5">
               <div className="text-xs text-muted">Client access</div>
@@ -421,5 +478,44 @@ function AddMembership({ user, clients, onAdd }) {
         add
       </button>
     </div>
+  );
+}
+
+function ResetPasswordForm({ onSubmit, onCancel }) {
+  const [pw, setPw] = useState('');
+  return (
+    <form
+      onSubmit={(e) => {
+        e.preventDefault();
+        if (pw.length < 12) {
+          alert('Password must be at least 12 characters.');
+          return;
+        }
+        onSubmit(pw);
+        setPw('');
+      }}
+      className="mt-2 flex items-center gap-2"
+    >
+      <input
+        type="text"
+        autoFocus
+        placeholder="New password (≥ 12 chars)"
+        value={pw}
+        onChange={(e) => setPw(e.target.value)}
+        className="flex-1 bg-bg border border-border rounded px-2 py-1 text-xs font-mono"
+        minLength={12}
+        required
+      />
+      <button className="text-xs px-2 py-1 rounded bg-accent text-bg">
+        set password
+      </button>
+      <button
+        type="button"
+        onClick={onCancel}
+        className="text-xs px-2 py-1 rounded bg-border hover:bg-border/70"
+      >
+        cancel
+      </button>
+    </form>
   );
 }

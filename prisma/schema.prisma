@@ -47,7 +47,7 @@ model User {
   id            String   @id @default(cuid())
   email         String   @unique
   name          String?
-  googleSub     String?  @unique
+  passwordHash  String?  // null = user cannot sign in until an admin sets a password
   isStaff       Boolean  @default(false) // internal staff: can manage everything
   createdAt     DateTime @default(now())
   lastLoginAt   DateTime?

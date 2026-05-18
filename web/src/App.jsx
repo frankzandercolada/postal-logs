@@ -46,6 +46,7 @@ export default function App() {
 
 function Header({ me }) {
   const nav = useNavigate();
+  const [showPw, setShowPw] = useState(false);
   async function handleLogout() {
     await api.logout();
     nav('/');
@@ -66,6 +67,12 @@ function Header({ me }) {
         <div className="ml-auto flex items-center gap-3 text-sm text-muted">
           <span>{me.email}</span>
           <button
+            onClick={() => setShowPw(true)}
+            className="text-muted hover:text-ink underline-offset-2 hover:underline"
+          >
+            change password
+          </button>
+          <button
             onClick={handleLogout}
             className="text-muted hover:text-ink underline-offset-2 hover:underline"
           >
@@ -73,7 +80,104 @@ function Header({ me }) {
           </button>
         </div>
       </div>
+      {showPw && <ChangePasswordModal onClose={() => setShowPw(false)} />}
     </header>
+  );
+}
+
+function ChangePasswordModal({ onClose }) {
+  const [current, setCurrent] = useState('');
+  const [next, setNext] = useState('');
+  const [confirm, setConfirm] = useState('');
+  const [error, setError] = useState(null);
+  const [busy, setBusy] = useState(false);
+
+  async function submit(e) {
+    e.preventDefault();
+    setError(null);
+    if (next.length < 12) {
+      setError('New password must be at least 12 characters.');
+      return;
+    }
+    if (next !== confirm) {
+      setError('New password and confirmation do not match.');
+      return;
+    }
+    setBusy(true);
+    try {
+      await api.changePassword(current, next);
+      alert('Password updated.');
+      onClose();
+    } catch (err) {
+      setError(err.message.includes('invalid_current_password')
+        ? 'Current password is incorrect.'
+        : err.message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div
+      className="fixed inset-0 bg-black/60 flex items-center justify-center z-50 px-6"
+      onClick={onClose}
+    >
+      <form
+        onClick={(e) => e.stopPropagation()}
+        onSubmit={submit}
+        className="w-full max-w-sm bg-panel border border-border rounded-lg p-6 space-y-3"
+      >
+        <h2 className="text-lg font-semibold">Change password</h2>
+        <input
+          type="password"
+          autoComplete="current-password"
+          placeholder="Current password"
+          value={current}
+          onChange={(e) => setCurrent(e.target.value)}
+          className="w-full bg-bg border border-border rounded-md px-3 py-2 text-sm"
+          required
+        />
+        <input
+          type="password"
+          autoComplete="new-password"
+          placeholder="New password (≥ 12 chars)"
+          value={next}
+          onChange={(e) => setNext(e.target.value)}
+          className="w-full bg-bg border border-border rounded-md px-3 py-2 text-sm"
+          minLength={12}
+          required
+        />
+        <input
+          type="password"
+          autoComplete="new-password"
+          placeholder="Confirm new password"
+          value={confirm}
+          onChange={(e) => setConfirm(e.target.value)}
+          className="w-full bg-bg border border-border rounded-md px-3 py-2 text-sm"
+          required
+        />
+        {error && (
+          <div className="text-sm text-bad bg-bad/10 border border-bad/30 rounded px-3 py-2">
+            {error}
+          </div>
+        )}
+        <div className="flex justify-end gap-2">
+          <button
+            type="button"
+            onClick={onClose}
+            className="px-3 py-2 rounded bg-border hover:bg-border/70 text-sm"
+          >
+            cancel
+          </button>
+          <button
+            disabled={busy}
+            className="px-3 py-2 rounded bg-accent text-bg text-sm font-medium disabled:opacity-50"
+          >
+            {busy ? 'saving…' : 'save'}
+          </button>
+        </div>
+      </form>
+    </div>
   );
 }
 

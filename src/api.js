@@ -1,5 +1,12 @@
 import { prisma } from './db.js';
-import { requireAuth, requireStaff, accessibleClientIds } from './auth.js';
+import {
+  requireAuth,
+  requireStaff,
+  accessibleClientIds,
+  hashPassword,
+  verifyPassword,
+  MIN_PASSWORD_LEN,
+} from './auth.js';
 import { stringify } from 'csv-stringify';
 import { nanoid } from 'nanoid';
 
@@ -399,20 +406,88 @@ export async function registerApi(app) {
 
   app.post('/api/admin/users', async (req, reply) => {
     if (!requireStaff(req, reply)) return;
-    const { email, name, isStaff } = req.body || {};
+    const { email, name, isStaff, password } = req.body || {};
     if (!email) return reply.code(400).send({ error: 'email_required' });
+    const normalized = email.toLowerCase().trim();
+    const existing = await prisma.user.findUnique({ where: { email: normalized } });
+
+    let passwordHash;
+    if (password) {
+      try {
+        passwordHash = await hashPassword(password);
+      } catch (err) {
+        return reply
+          .code(400)
+          .send({ error: err.message, minLength: err.minLength || MIN_PASSWORD_LEN });
+      }
+    } else if (!existing) {
+      // New user with no password = can't ever sign in. Require one.
+      return reply
+        .code(400)
+        .send({ error: 'password_required', minLength: MIN_PASSWORD_LEN });
+    }
+
     return prisma.user.upsert({
-      where: { email: email.toLowerCase().trim() },
+      where: { email: normalized },
       create: {
-        email: email.toLowerCase().trim(),
+        email: normalized,
         name: name || null,
         isStaff: !!isStaff,
+        passwordHash,
       },
       update: {
         name: name || undefined,
         isStaff: typeof isStaff === 'boolean' ? isStaff : undefined,
+        passwordHash: passwordHash || undefined,
       },
     });
+  });
+
+  // Admin resets a user's password to a value of their choice.
+  app.post('/api/admin/users/:id/reset-password', async (req, reply) => {
+    if (!requireStaff(req, reply)) return;
+    const { password } = req.body || {};
+    let passwordHash;
+    try {
+      passwordHash = await hashPassword(password);
+    } catch (err) {
+      return reply
+        .code(400)
+        .send({ error: err.message, minLength: err.minLength || MIN_PASSWORD_LEN });
+    }
+    await prisma.user.update({
+      where: { id: req.params.id },
+      data: { passwordHash },
+    });
+    // Invalidate all of that user's existing sessions so they re-login.
+    await prisma.session.deleteMany({ where: { userId: req.params.id } });
+    return { ok: true };
+  });
+
+  // Current user changes their own password.
+  app.post('/api/me/password', async (req, reply) => {
+    const u = requireAuth(req, reply);
+    if (!u) return;
+    const { currentPassword, newPassword } = req.body || {};
+    const current = await prisma.user.findUnique({ where: { id: u.id } });
+    if (!(await verifyPassword(currentPassword, current.passwordHash))) {
+      return reply.code(401).send({ error: 'invalid_current_password' });
+    }
+    let passwordHash;
+    try {
+      passwordHash = await hashPassword(newPassword);
+    } catch (err) {
+      return reply
+        .code(400)
+        .send({ error: err.message, minLength: err.minLength || MIN_PASSWORD_LEN });
+    }
+    await prisma.user.update({ where: { id: u.id }, data: { passwordHash } });
+    // Keep current session valid; other sessions get cleared.
+    const sid = req.cookies?.pe_sid;
+    await prisma.session.deleteMany({
+      where: { userId: u.id, ...(sid ? { NOT: { id: sid } } : {}) },
+    });
+    return { ok: true };
   });
 
   app.post('/api/admin/memberships', async (req, reply) => {

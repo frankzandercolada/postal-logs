@@ -41,10 +41,21 @@ export const api = {
   adminUsers: () => request('/api/admin/users'),
   adminUpsertUser: (data) =>
     request('/api/admin/users', { method: 'POST', body: JSON.stringify(data) }),
+  adminResetPassword: (userId, password) =>
+    request(`/api/admin/users/${userId}/reset-password`, {
+      method: 'POST',
+      body: JSON.stringify({ password }),
+    }),
   adminUpsertMembership: (data) =>
     request('/api/admin/memberships', { method: 'POST', body: JSON.stringify(data) }),
   adminDeleteMembership: (userId, clientId) =>
     request(`/api/admin/memberships/${userId}/${clientId}`, { method: 'DELETE' }),
+
+  changePassword: (currentPassword, newPassword) =>
+    request('/api/me/password', {
+      method: 'POST',
+      body: JSON.stringify({ currentPassword, newPassword }),
+    }),
 
   logout: () => fetch('/auth/logout', { method: 'POST', credentials: 'include' }),
 };

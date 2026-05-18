@@ -2,6 +2,7 @@ import { PrismaClient } from '@prisma/client';
 import { execSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
+import bcrypt from 'bcryptjs';
 
 const DATA_DIR = '/app/data';
 const DB_FILE = path.join(DATA_DIR, 'postal-logs.db');
@@ -33,18 +34,30 @@ export async function runMigrations() {
     execSync('npx prisma db push --skip-generate', { stdio: 'inherit' });
   }
 
-  // Bootstrap admin
+  // Bootstrap admin — only seeds when no users exist yet. After first boot
+  // BOOTSTRAP_ADMIN_PASSWORD can be removed from .env.
   const bootstrapEmail = (process.env.BOOTSTRAP_ADMIN_EMAIL || '').toLowerCase().trim();
+  const bootstrapPassword = process.env.BOOTSTRAP_ADMIN_PASSWORD || '';
   if (bootstrapEmail) {
-    const existing = await prisma.user.findUnique({ where: { email: bootstrapEmail } });
-    if (!existing) {
-      await prisma.user.create({
-        data: { email: bootstrapEmail, isStaff: true },
-      });
-      console.log(`bootstrap admin created: ${bootstrapEmail}`);
-    } else if (!existing.isStaff) {
-      await prisma.user.update({ where: { id: existing.id }, data: { isStaff: true } });
-      console.log(`bootstrap admin promoted: ${bootstrapEmail}`);
+    const userCount = await prisma.user.count();
+    if (userCount === 0) {
+      if (bootstrapPassword.length < 12) {
+        console.warn(
+          'BOOTSTRAP_ADMIN_EMAIL is set but BOOTSTRAP_ADMIN_PASSWORD is missing or shorter than 12 chars; skipping seed.',
+        );
+      } else {
+        const passwordHash = await bcrypt.hash(bootstrapPassword, 12);
+        await prisma.user.create({
+          data: { email: bootstrapEmail, isStaff: true, passwordHash },
+        });
+        console.log(`bootstrap admin created: ${bootstrapEmail}`);
+      }
+    } else {
+      const existing = await prisma.user.findUnique({ where: { email: bootstrapEmail } });
+      if (existing && !existing.isStaff) {
+        await prisma.user.update({ where: { id: existing.id }, data: { isStaff: true } });
+        console.log(`bootstrap admin promoted: ${bootstrapEmail}`);
+      }
     }
   }
 }
