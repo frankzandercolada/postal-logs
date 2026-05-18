@@ -173,22 +173,41 @@ export async function registerApi(app) {
   });
 
   // --- stats: dashboard summary ---
+  // Accepts:
+  //   minutes (int)    — lookback window in minutes (default 30 days)
+  //   bucket  (string) — 'minute' | 'hour' | 'day' (default inferred from minutes)
+  //   clientId         — restrict to a single accessible client
   app.get('/api/stats/summary', async (req, reply) => {
     const u = requireAuth(req, reply);
     if (!u) return;
     const ids = await accessibleClientIds(u);
     const clientId = req.query.clientId;
     const targetIds = clientId ? [clientId].filter((id) => ids.includes(id)) : ids;
-    if (targetIds.length === 0) return { byType: [], byDay: [], topBounces: [] };
+    if (targetIds.length === 0) {
+      return { byType: [], byBucket: [], topBounces: [], bucket: 'day' };
+    }
 
-    const days = parseInt(req.query.days || '30', 10);
     // Cap the live window at the raw-event retention so we never look further
     // back than what's actually in the Event table.
-    const retainDays = parseInt(process.env.RETAIN_RAW_DAYS || '120', 10);
-    const effectiveDays = Math.min(days, retainDays);
-    const since = new Date(Date.now() - effectiveDays * 24 * 60 * 60 * 1000);
+    const retainMinutes =
+      parseInt(process.env.RETAIN_RAW_DAYS || '120', 10) * 24 * 60;
+    let minutes = parseInt(req.query.minutes || `${30 * 24 * 60}`, 10);
+    if (!Number.isFinite(minutes) || minutes <= 0) minutes = 30 * 24 * 60;
+    minutes = Math.min(minutes, retainMinutes);
 
-    // Counts by event type — live from raw events so today is included.
+    const requestedBucket = req.query.bucket;
+    const bucket =
+      requestedBucket === 'minute' || requestedBucket === 'hour' || requestedBucket === 'day'
+        ? requestedBucket
+        : minutes <= 60
+        ? 'minute'
+        : minutes <= 24 * 60
+        ? 'hour'
+        : 'day';
+
+    const since = new Date(Date.now() - minutes * 60 * 1000);
+
+    // Counts by event type within the window — live from raw events.
     const byTypeRaw = await prisma.event.groupBy({
       by: ['eventType'],
       where: { clientId: { in: targetIds }, receivedAt: { gte: since } },
@@ -196,24 +215,22 @@ export async function registerApi(app) {
       orderBy: { _count: { eventType: 'desc' } },
     });
 
-    // Counts by (date, eventType). Prisma's groupBy can't group on a derived
-    // date column, so use a $queryRaw with strftime. Parameterize via tagged
-    // template to avoid injection.
-    const sinceIso = since.toISOString();
+    // Prisma's groupBy can't group on a derived column, so use $queryRawUnsafe
+    // with substr() against the ISO8601 receivedAt. UTC throughout — frontend
+    // formats for display.
+    const bucketLen = bucket === 'day' ? 10 : bucket === 'hour' ? 13 : 16;
     const placeholders = targetIds.map(() => '?').join(',');
-    // Prisma stores SQLite DateTime as ISO8601 text, so the YYYY-MM-DD
-    // prefix is the UTC date for the day-bucket.
-    const byDayRows = await prisma.$queryRawUnsafe(
-      `SELECT substr(receivedAt, 1, 10) AS date,
+    const byBucketRows = await prisma.$queryRawUnsafe(
+      `SELECT substr(receivedAt, 1, ${bucketLen}) AS bucket,
               eventType,
               COUNT(*) AS count
          FROM Event
         WHERE clientId IN (${placeholders})
           AND receivedAt >= ?
-        GROUP BY date, eventType
-        ORDER BY date ASC`,
+        GROUP BY bucket, eventType
+        ORDER BY bucket ASC`,
       ...targetIds,
-      sinceIso,
+      since.toISOString(),
     );
 
     // Top bounce reasons within the same window.
@@ -231,11 +248,12 @@ export async function registerApi(app) {
     });
 
     return {
+      bucket,
       byType: byTypeRaw.map((r) => ({ eventType: r.eventType, count: r._count._all })),
-      byDay: byDayRows.map((r) => ({
-        date: r.date,
+      byBucket: byBucketRows.map((r) => ({
+        bucket: r.bucket,
         eventType: r.eventType,
-        // SQLite returns COUNT(*) as a BigInt with $queryRaw — coerce to Number.
+        // SQLite returns COUNT(*) as a BigInt under $queryRaw — coerce.
         count: typeof r.count === 'bigint' ? Number(r.count) : r.count,
       })),
       topBounces: topBounces.map((r) => ({
