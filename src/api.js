@@ -182,34 +182,47 @@ export async function registerApi(app) {
     if (targetIds.length === 0) return { byType: [], byDay: [], topBounces: [] };
 
     const days = parseInt(req.query.days || '30', 10);
-    const since = new Date(Date.now() - days * 24 * 60 * 60 * 1000);
-    const sinceDateStr = isoDate(since);
+    // Cap the live window at the raw-event retention so we never look further
+    // back than what's actually in the Event table.
+    const retainDays = parseInt(process.env.RETAIN_RAW_DAYS || '120', 10);
+    const effectiveDays = Math.min(days, retainDays);
+    const since = new Date(Date.now() - effectiveDays * 24 * 60 * 60 * 1000);
 
-    // Counts by event type from stats_daily (for long-range queries this stays fast)
-    const byType = await prisma.statDaily.groupBy({
+    // Counts by event type — live from raw events so today is included.
+    const byTypeRaw = await prisma.event.groupBy({
       by: ['eventType'],
-      where: { clientId: { in: targetIds }, date: { gte: sinceDateStr } },
-      _sum: { count: true },
-      orderBy: { _sum: { count: 'desc' } },
+      where: { clientId: { in: targetIds }, receivedAt: { gte: since } },
+      _count: { _all: true },
+      orderBy: { _count: { eventType: 'desc' } },
     });
 
-    const byDay = await prisma.statDaily.groupBy({
-      by: ['date', 'eventType'],
-      where: { clientId: { in: targetIds }, date: { gte: sinceDateStr } },
-      _sum: { count: true },
-      orderBy: { date: 'asc' },
-    });
-
-    // Top bounce reasons from recent raw events (within retention window)
-    const recentSince = new Date(
-      Math.max(since.getTime(), Date.now() - 90 * 24 * 60 * 60 * 1000),
+    // Counts by (date, eventType). Prisma's groupBy can't group on a derived
+    // date column, so use a $queryRaw with strftime. Parameterize via tagged
+    // template to avoid injection.
+    const sinceIso = since.toISOString();
+    const placeholders = targetIds.map(() => '?').join(',');
+    // Prisma stores SQLite DateTime as ISO8601 text, so the YYYY-MM-DD
+    // prefix is the UTC date for the day-bucket.
+    const byDayRows = await prisma.$queryRawUnsafe(
+      `SELECT substr(receivedAt, 1, 10) AS date,
+              eventType,
+              COUNT(*) AS count
+         FROM Event
+        WHERE clientId IN (${placeholders})
+          AND receivedAt >= ?
+        GROUP BY date, eventType
+        ORDER BY date ASC`,
+      ...targetIds,
+      sinceIso,
     );
+
+    // Top bounce reasons within the same window.
     const topBounces = await prisma.event.groupBy({
       by: ['details'],
       where: {
         clientId: { in: targetIds },
         bounceType: 'hard',
-        receivedAt: { gte: recentSince },
+        receivedAt: { gte: since },
         details: { not: null },
       },
       _count: { _all: true },
@@ -218,11 +231,12 @@ export async function registerApi(app) {
     });
 
     return {
-      byType: byType.map((r) => ({ eventType: r.eventType, count: r._sum.count || 0 })),
-      byDay: byDay.map((r) => ({
+      byType: byTypeRaw.map((r) => ({ eventType: r.eventType, count: r._count._all })),
+      byDay: byDayRows.map((r) => ({
         date: r.date,
         eventType: r.eventType,
-        count: r._sum.count || 0,
+        // SQLite returns COUNT(*) as a BigInt with $queryRaw — coerce to Number.
+        count: typeof r.count === 'bigint' ? Number(r.count) : r.count,
       })),
       topBounces: topBounces.map((r) => ({
         reason: r.details,
@@ -576,10 +590,6 @@ async function buildEventFilter(user, q) {
     where.receivedAt.gte = showSince;
   }
   return where;
-}
-
-function isoDate(d) {
-  return d.toISOString().slice(0, 10);
 }
 
 function safeJsonParse(s) {
