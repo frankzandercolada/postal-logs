@@ -46,11 +46,15 @@ export async function registerWebhook(app) {
     }
 
     const rawBody = req.rawBody || '';
-    const verifyResult = verifyPostalSignature(
-      rawBody,
-      signatureHeader,
-      mailServer.publicKeyPem,
-    );
+    const publicKeyPem = mailServer.publicKeyPem || mailServer.client.publicKeyPem;
+    if (!publicKeyPem) {
+      req.log.error(
+        { mailServerId: mailServer.id, clientId: mailServer.clientId },
+        'no public key set on mail server or its client',
+      );
+      return reply.code(503).send({ error: 'public_key_missing' });
+    }
+    const verifyResult = verifyPostalSignature(rawBody, signatureHeader, publicKeyPem);
     if (!verifyResult.ok) {
       req.log.warn(
         { mailServerId: mailServer.id, name: mailServer.name },

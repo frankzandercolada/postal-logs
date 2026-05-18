@@ -103,9 +103,19 @@ Commit the resulting `prisma/migrations/` folder and rebuild.
 
 ## Backups
 
-Just back up `./data/postal-logs.db`. It's a single SQLite file. A
-nightly `sqlite3 postal-logs.db ".backup '/backup/...'"` to another
-volume or to GCS is enough.
+Run `./deploy.sh backup` (or `./backup.sh` directly). It calls `sqlite3
+.backup` inside the app container to take a consistent online snapshot,
+gzips it to `./backups/`, and keeps the last 14 days. SQLite is robust
+to being copied while open via `.backup`, so this is safe under traffic.
+
+Cron example (root crontab):
+
+```
+15 3 * * *  cd /root/postal-logs && ./backup.sh >> backups/cron.log 2>&1
+```
+
+For offsite copies, pipe the `./backups/` directory to a bucket after
+the script runs (e.g. `gsutil rsync -d ./backups gs://your-bucket/postal-logs/`).
 
 ## Updating
 

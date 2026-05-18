@@ -9,8 +9,9 @@ RUN npm run build
 # --- backend ---
 FROM node:20-alpine AS app
 
-# Prisma on Alpine needs OpenSSL; wget is used by HEALTHCHECK.
-RUN apk add --no-cache openssl wget
+# Prisma on Alpine needs OpenSSL; wget is used by HEALTHCHECK; sqlite is used
+# by backup.sh to take consistent online snapshots of the database.
+RUN apk add --no-cache openssl wget sqlite
 
 WORKDIR /app
 

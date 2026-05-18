@@ -59,8 +59,12 @@ case "$cmd" in
     require_env
     docker compose down
     ;;
+  backup)
+    require_env
+    ./backup.sh
+    ;;
   *)
-    echo "Usage: $0 [init|update|logs|status|down]"
+    echo "Usage: $0 [init|update|logs|status|down|backup]"
     exit 1
     ;;
 esac

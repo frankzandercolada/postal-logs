@@ -14,11 +14,15 @@ datasource db {
 }
 
 model Client {
-  id          String   @id @default(cuid())
-  name        String
-  slug        String   @unique
-  createdAt   DateTime @default(now())
-  archivedAt  DateTime?
+  id           String   @id @default(cuid())
+  name         String
+  slug         String   @unique
+  // Postal's server-wide signing key (X-Postal-Signature). One key per
+  // Postal install; mail servers under the same Postal use the same key,
+  // so we keep it at the Client level by default.
+  publicKeyPem String?
+  createdAt    DateTime @default(now())
+  archivedAt   DateTime?
 
   mailServers MailServer[]
   memberships Membership[]
@@ -34,7 +38,9 @@ model MailServer {
   name            String
   postalServerId  Int?     // the numeric id in your Postal install, optional
   webhookToken    String   @unique // path segment in the webhook URL
-  publicKeyPem    String   // for verifying X-Postal-Signature
+  // Optional per-mail-server override. If null, the client's publicKeyPem
+  // is used to verify webhook signatures.
+  publicKeyPem    String?
   createdAt       DateTime @default(now())
 
   events          Event[]
@@ -70,11 +76,12 @@ model Membership {
 }
 
 model Session {
-  id        String   @id // random token from cookie
-  userId    String
-  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
-  createdAt DateTime @default(now())
-  expiresAt DateTime
+  id           String   @id // random token from cookie
+  userId       String
+  user         User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  createdAt    DateTime @default(now())
+  expiresAt    DateTime
+  lastActiveAt DateTime @default(now()) // used for idle-timeout enforcement
 
   @@index([userId])
   @@index([expiresAt])

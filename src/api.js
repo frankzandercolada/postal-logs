@@ -309,15 +309,39 @@ export async function registerApi(app) {
 
   app.post('/api/admin/clients', async (req, reply) => {
     if (!requireStaff(req, reply)) return;
-    const { name } = req.body || {};
+    const { name, publicKeyPem } = req.body || {};
     if (!name || typeof name !== 'string') {
       return reply.code(400).send({ error: 'name_required' });
+    }
+    let normalizedKey;
+    if (publicKeyPem) {
+      normalizedKey = normalizePublicKey(publicKeyPem);
+      if (!normalizedKey) return reply.code(400).send({ error: 'invalid_public_key' });
     }
     const slug = name
       .toLowerCase()
       .replace(/[^a-z0-9]+/g, '-')
       .replace(/^-|-$/g, '') + '-' + nanoid(6);
-    return prisma.client.create({ data: { name, slug } });
+    return prisma.client.create({ data: { name, slug, publicKeyPem: normalizedKey } });
+  });
+
+  // Edit the client's default Postal signing key. New mail servers under this
+  // client can omit publicKeyPem and inherit it.
+  app.patch('/api/admin/clients/:id', async (req, reply) => {
+    if (!requireStaff(req, reply)) return;
+    const { name, publicKeyPem } = req.body || {};
+    const data = {};
+    if (typeof name === 'string' && name.trim()) data.name = name.trim();
+    if (publicKeyPem !== undefined) {
+      if (publicKeyPem === null || publicKeyPem === '') {
+        data.publicKeyPem = null;
+      } else {
+        const normalizedKey = normalizePublicKey(publicKeyPem);
+        if (!normalizedKey) return reply.code(400).send({ error: 'invalid_public_key' });
+        data.publicKeyPem = normalizedKey;
+      }
+    }
+    return prisma.client.update({ where: { id: req.params.id }, data });
   });
 
   app.delete('/api/admin/clients/:id', async (req, reply) => {
@@ -332,12 +356,23 @@ export async function registerApi(app) {
   app.post('/api/admin/clients/:id/mail-servers', async (req, reply) => {
     if (!requireStaff(req, reply)) return;
     const { name, publicKeyPem, postalServerId } = req.body || {};
-    if (!name || !publicKeyPem) {
-      return reply.code(400).send({ error: 'name_and_public_key_required' });
-    }
-    const normalizedKey = normalizePublicKey(publicKeyPem);
-    if (!normalizedKey) {
-      return reply.code(400).send({ error: 'invalid_public_key' });
+    if (!name) return reply.code(400).send({ error: 'name_required' });
+
+    // If a key is given, normalize and use it as an override. Otherwise the
+    // mail server inherits the client's publicKeyPem. Reject if neither
+    // exists so the mail server isn't created in a broken state.
+    let normalizedKey = null;
+    if (publicKeyPem) {
+      normalizedKey = normalizePublicKey(publicKeyPem);
+      if (!normalizedKey) return reply.code(400).send({ error: 'invalid_public_key' });
+    } else {
+      const client = await prisma.client.findUnique({
+        where: { id: req.params.id },
+        select: { publicKeyPem: true },
+      });
+      if (!client?.publicKeyPem) {
+        return reply.code(400).send({ error: 'client_has_no_public_key' });
+      }
     }
     const ms = await prisma.mailServer.create({
       data: {

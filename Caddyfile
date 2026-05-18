@@ -12,15 +12,17 @@
 
 	reverse_proxy app:3000 {
 		header_up X-Real-IP {remote_host}
-		header_up X-Forwarded-For {remote_host}
-		header_up X-Forwarded-Proto {scheme}
 	}
 
-	# Basic security headers (the app sets more granular ones)
+	# Security headers. CSP is tight; the app is a self-contained SPA so it
+	# only needs same-origin scripts, fetch, and styles. style-src allows
+	# inline because Tailwind / React inline `style=` attributes need it.
 	header {
 		Strict-Transport-Security "max-age=31536000; includeSubDomains"
 		X-Content-Type-Options "nosniff"
 		Referrer-Policy "strict-origin-when-cross-origin"
+		Permissions-Policy "geolocation=(), microphone=(), camera=()"
+		Content-Security-Policy "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; connect-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'"
 		-Server
 	}
 

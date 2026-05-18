@@ -1,14 +1,30 @@
 import crypto from 'node:crypto';
 import bcrypt from 'bcryptjs';
+import fastifyRateLimit from '@fastify/rate-limit';
 import { prisma } from './db.js';
 
 const SESSION_COOKIE = 'pe_sid';
-const SESSION_DAYS = 30;
+const SESSION_DAYS = 14;
+const SESSION_IDLE_DAYS = parseInt(process.env.SESSION_IDLE_DAYS || '7', 10);
 const BCRYPT_COST = 12;
 const MIN_PASSWORD_LEN = 12;
 
 export async function registerAuth(app) {
-  app.post('/auth/login', async (req, reply) => {
+  // Per-route rate limiting; not registered as global because the rest of the
+  // API has its own auth gating and rate-limiting JSON GETs adds noise.
+  await app.register(fastifyRateLimit, { global: false });
+
+  app.post('/auth/login', {
+    config: {
+      rateLimit: {
+        max: 10,
+        timeWindow: '15 minutes',
+        // Key on IP only — adding the email gives attackers a clean way to
+        // know they've been throttled, and we don't want to leak which emails
+        // exist via differential response. IP throttling is the right knob.
+      },
+    },
+  }, async (req, reply) => {
     const { email, password } = req.body || {};
     const e = (email || '').toLowerCase().trim();
     const p = typeof password === 'string' ? password : '';
@@ -33,7 +49,7 @@ export async function registerAuth(app) {
       .setCookie(SESSION_COOKIE, session.id, {
         path: '/',
         httpOnly: true,
-        sameSite: 'lax',
+        sameSite: 'strict',
         secure: process.env.NODE_ENV === 'production',
         maxAge: SESSION_DAYS * 24 * 60 * 60,
       })
@@ -59,11 +75,23 @@ export async function registerAuth(app) {
       include: { user: true },
     });
     if (!session) return;
-    if (session.expiresAt < new Date()) {
+    const now = new Date();
+    if (session.expiresAt < now) {
+      await prisma.session.delete({ where: { id: sid } }).catch(() => {});
+      return;
+    }
+    const idleMs = SESSION_IDLE_DAYS * 24 * 60 * 60 * 1000;
+    if (now - session.lastActiveAt > idleMs) {
       await prisma.session.delete({ where: { id: sid } }).catch(() => {});
       return;
     }
     req.currentUser = session.user;
+    // Throttle lastActiveAt writes to once per minute per session.
+    if (now - session.lastActiveAt > 60 * 1000) {
+      prisma.session
+        .update({ where: { id: sid }, data: { lastActiveAt: now } })
+        .catch(() => {});
+    }
   });
 }
 

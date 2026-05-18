@@ -79,15 +79,42 @@ function Clients() {
 
 function ClientCard({ client, onChange, revealed, setRevealed }) {
   const [adding, setAdding] = useState(false);
+  const [editingKey, setEditingKey] = useState(false);
+  const [keyDraft, setKeyDraft] = useState('');
+  const [keyError, setKeyError] = useState(null);
   const [form, setForm] = useState({ name: '', publicKeyPem: '', postalServerId: '' });
+  const hasClientKey = !!client.publicKeyPem;
 
   async function addServer(e) {
     e.preventDefault();
-    const ms = await api.adminCreateMailServer(client.id, form);
-    setRevealed({ id: ms.id, url: ms.webhookUrl });
-    setForm({ name: '', publicKeyPem: '', postalServerId: '' });
-    setAdding(false);
-    onChange();
+    try {
+      const ms = await api.adminCreateMailServer(client.id, form);
+      setRevealed({ id: ms.id, url: ms.webhookUrl });
+      setForm({ name: '', publicKeyPem: '', postalServerId: '' });
+      setAdding(false);
+      onChange();
+    } catch (err) {
+      if (err.message.includes('client_has_no_public_key')) {
+        alert('No public key set on this client yet. Add one first.');
+      } else {
+        alert('Create failed: ' + err.message);
+      }
+    }
+  }
+
+  async function saveClientKey(e) {
+    e.preventDefault();
+    setKeyError(null);
+    try {
+      await api.adminUpdateClient(client.id, { publicKeyPem: keyDraft });
+      setEditingKey(false);
+      setKeyDraft('');
+      onChange();
+    } catch (err) {
+      setKeyError(err.message.includes('invalid_public_key')
+        ? 'Public key looks invalid — paste the base64 from `postal default-dkim-record`.'
+        : err.message);
+    }
   }
 
   async function deleteServer(id) {
@@ -109,6 +136,24 @@ function ClientCard({ client, onChange, revealed, setRevealed }) {
         <div>
           <div className="font-medium">{client.name}</div>
           <div className="text-xs text-muted font-mono">{client.slug}</div>
+          <div className="text-xs mt-1">
+            Postal signing key:&nbsp;
+            {hasClientKey ? (
+              <span className="text-good">set</span>
+            ) : (
+              <span className="text-bad">not set</span>
+            )}
+            <button
+              onClick={() => {
+                setEditingKey(!editingKey);
+                setKeyDraft('');
+                setKeyError(null);
+              }}
+              className="ml-2 text-xs underline text-muted hover:text-ink"
+            >
+              {editingKey ? 'cancel' : hasClientKey ? 'replace' : 'set key'}
+            </button>
+          </div>
         </div>
         <button
           onClick={() => setAdding(!adding)}
@@ -117,6 +162,23 @@ function ClientCard({ client, onChange, revealed, setRevealed }) {
           {adding ? 'cancel' : '+ mail server'}
         </button>
       </div>
+
+      {editingKey && (
+        <form onSubmit={saveClientKey} className="bg-bg border border-border rounded p-3 mb-3 space-y-2">
+          <textarea
+            value={keyDraft}
+            onChange={(e) => setKeyDraft(e.target.value)}
+            placeholder={'Paste the base64 from `postal default-dkim-record` (server-wide signing key).\nThe `p=...` part. The app normalizes it into PEM.'}
+            rows={5}
+            className="w-full bg-panel border border-border rounded px-3 py-2 text-xs font-mono"
+            required
+          />
+          {keyError && <div className="text-xs text-bad">{keyError}</div>}
+          <button className="px-4 py-2 rounded bg-accent text-bg text-sm font-medium">
+            Save key
+          </button>
+        </form>
+      )}
 
       {adding && (
         <form onSubmit={addServer} className="bg-bg border border-border rounded p-3 mb-3 space-y-2">
@@ -136,10 +198,13 @@ function ClientCard({ client, onChange, revealed, setRevealed }) {
           <textarea
             value={form.publicKeyPem}
             onChange={(e) => setForm({ ...form, publicKeyPem: e.target.value })}
-            placeholder={`Paste public key. You can use either:\n• full PEM (-----BEGIN PUBLIC KEY----- ...)\n• or just the base64 string after p= from \`postal default-dkim-record\``}
+            placeholder={
+              hasClientKey
+                ? 'Leave empty to inherit the client’s signing key. Paste only to override.'
+                : 'Paste the base64 from `postal default-dkim-record` (server-wide signing key). The `p=...` part.'
+            }
             rows={5}
             className="w-full bg-panel border border-border rounded px-3 py-2 text-xs font-mono"
-            required
           />
           <button className="px-4 py-2 rounded bg-accent text-bg text-sm font-medium">
             Create mail server

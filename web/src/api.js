@@ -27,6 +27,8 @@ export const api = {
   adminClients: () => request('/api/admin/clients'),
   adminCreateClient: (data) =>
     request('/api/admin/clients', { method: 'POST', body: JSON.stringify(data) }),
+  adminUpdateClient: (id, data) =>
+    request(`/api/admin/clients/${id}`, { method: 'PATCH', body: JSON.stringify(data) }),
   adminDeleteClient: (id) => request(`/api/admin/clients/${id}`, { method: 'DELETE' }),
   adminCreateMailServer: (clientId, data) =>
     request(`/api/admin/clients/${clientId}/mail-servers`, {

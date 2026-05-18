@@ -70,6 +70,26 @@ export async function runMigrations() {
         await prisma.user.update({ where: { id: existing.id }, data: { isStaff: true } });
         console.log(`bootstrap admin promoted: ${bootstrapEmail}`);
       }
+      if (bootstrapPassword) {
+        console.warn(
+          '!!! BOOTSTRAP_ADMIN_PASSWORD is still set in the environment but users already exist. ' +
+          'Remove it from .env to avoid leaking the initial password on disk.',
+        );
+      }
+    }
+  }
+
+  // Backfill Client.publicKeyPem from any of its mail servers. This runs
+  // every boot but is a no-op once every client has its key set.
+  const clientsToBackfill = await prisma.client.findMany({
+    where: { publicKeyPem: null },
+    include: { mailServers: { where: { publicKeyPem: { not: null } }, take: 1 } },
+  });
+  for (const c of clientsToBackfill) {
+    const key = c.mailServers[0]?.publicKeyPem;
+    if (key) {
+      await prisma.client.update({ where: { id: c.id }, data: { publicKeyPem: key } });
+      console.log(`backfilled publicKeyPem on client ${c.id}`);
     }
   }
 }
