@@ -61,37 +61,92 @@ export async function registerApi(app) {
   });
 
   // --- events list with filters ---
+  // groupRetries=1 (default) collapses MessageDelayed events with the same
+  // messageToken into a single row carrying retryCount and firstRetryAt.
+  // Pass groupRetries=0 to see every individual retry.
   app.get('/api/events', async (req, reply) => {
     const u = requireAuth(req, reply);
     if (!u) return;
     const where = await buildEventFilter(u, req.query);
     const take = Math.min(parseInt(req.query.limit || '100', 10), 500);
     const cursor = req.query.cursor || null;
+    const groupRetries = req.query.groupRetries !== '0';
 
-    const rows = await prisma.event.findMany({
-      where,
+    const select = {
+      id: true,
+      receivedAt: true,
+      postalTimestamp: true,
+      eventType: true,
+      rcptTo: true,
+      mailFrom: true,
+      subject: true,
+      status: true,
+      bounceType: true,
+      details: true,
+      messageToken: true,
+      clientId: true,
+      mailServerId: true,
+    };
+
+    if (!groupRetries) {
+      // Original behavior: cursor-paginated, returns every row.
+      const rows = await prisma.event.findMany({
+        where,
+        orderBy: { receivedAt: 'desc' },
+        take: take + 1,
+        ...(cursor ? { cursor: { id: cursor }, skip: 1 } : {}),
+        select,
+      });
+      const hasMore = rows.length > take;
+      const items = hasMore ? rows.slice(0, take) : rows;
+      return { items, nextCursor: hasMore ? items[items.length - 1].id : null };
+    }
+
+    // Grouped mode: overfetch then dedup MessageDelayed by messageToken in JS.
+    // Pagination uses receivedAt as the cursor so we can keep merging old
+    // delayed retries into the same group across pages.
+    const since = cursor ? new Date(cursor) : null;
+    const FETCH = Math.min(take * 5, 1000);
+    const whereGrouped = since
+      ? { ...where, receivedAt: { ...(where.receivedAt || {}), lt: since } }
+      : where;
+    const raw = await prisma.event.findMany({
+      where: whereGrouped,
       orderBy: { receivedAt: 'desc' },
-      take: take + 1,
-      ...(cursor ? { cursor: { id: cursor }, skip: 1 } : {}),
-      select: {
-        id: true,
-        receivedAt: true,
-        postalTimestamp: true,
-        eventType: true,
-        rcptTo: true,
-        mailFrom: true,
-        subject: true,
-        status: true,
-        bounceType: true,
-        details: true,
-        clientId: true,
-        mailServerId: true,
-      },
+      take: FETCH,
+      select,
     });
 
-    const hasMore = rows.length > take;
-    const items = hasMore ? rows.slice(0, take) : rows;
-    return { items, nextCursor: hasMore ? items[items.length - 1].id : null };
+    // Group MessageDelayed events with a non-null messageToken; everything else
+    // passes through as-is.
+    const seen = new Map(); // messageToken -> head event index in `out`
+    const out = [];
+    for (const ev of raw) {
+      if (ev.eventType === 'MessageDelayed' && ev.messageToken) {
+        const idx = seen.get(ev.messageToken);
+        if (idx === undefined) {
+          seen.set(ev.messageToken, out.length);
+          out.push({ ...ev, retryCount: 1, firstRetryAt: ev.receivedAt });
+        } else {
+          const head = out[idx];
+          head.retryCount += 1;
+          // raw is desc by receivedAt, so any later event has earlier time.
+          head.firstRetryAt = ev.receivedAt;
+        }
+      } else {
+        out.push(ev);
+      }
+    }
+    const hasMore = raw.length === FETCH;
+    const sliced = out.slice(0, take);
+    const last = sliced[sliced.length - 1];
+    return {
+      items: sliced,
+      // Cursor is the receivedAt of the last returned row. Next page asks for
+      // events strictly older than this timestamp.
+      nextCursor: hasMore && last ? new Date(last.receivedAt).toISOString() : null,
+      grouped: true,
+    };
   });
 
   // --- single event detail (with raw JSON) ---
@@ -225,23 +280,43 @@ export async function registerApi(app) {
         : 'day';
 
     const since = new Date(Date.now() - minutes * 60 * 1000);
+    const groupRetries = req.query.groupRetries !== '0';
 
-    // Counts by event type within the window — live from raw events.
-    const byTypeRaw = await prisma.event.groupBy({
-      by: ['eventType'],
-      where: { mailServerId: { in: mailServerIds }, receivedAt: { gte: since } },
-      _count: { _all: true },
-      orderBy: { _count: { eventType: 'desc' } },
-    });
-
-    // Bucket events in JS. Prisma's groupBy can't group on a derived column,
-    // and SQL date functions on SQLite vary depending on how Prisma stores
-    // the DateTime (numeric ms vs ISO text). Going through Date objects in
-    // JS sidesteps all of that and is plenty fast for typical volumes.
+    // Pull raw events once and aggregate in JS. Going through Date objects
+    // sidesteps SQLite's date-format ambiguity (Prisma 5 stores DateTime as
+    // numeric ms), and lets us dedup MessageDelayed by messageToken cleanly.
     const rawEvents = await prisma.event.findMany({
       where: { mailServerId: { in: mailServerIds }, receivedAt: { gte: since } },
-      select: { receivedAt: true, eventType: true },
+      select: { receivedAt: true, eventType: true, messageToken: true },
     });
+
+    // When groupRetries is on, collapse MessageDelayed events with the same
+    // messageToken to the FIRST occurrence in the window. That gives "how
+    // many messages got delayed" rather than "how many retry attempts".
+    let processed = rawEvents;
+    if (groupRetries) {
+      // Sort ascending so we keep the earliest event per token.
+      const sorted = [...rawEvents].sort((a, b) => a.receivedAt - b.receivedAt);
+      const seenTokens = new Set();
+      processed = [];
+      for (const ev of sorted) {
+        if (ev.eventType === 'MessageDelayed' && ev.messageToken) {
+          if (seenTokens.has(ev.messageToken)) continue;
+          seenTokens.add(ev.messageToken);
+        }
+        processed.push(ev);
+      }
+    }
+
+    // byType from the deduped set.
+    const byTypeCounts = new Map();
+    for (const ev of processed) {
+      byTypeCounts.set(ev.eventType, (byTypeCounts.get(ev.eventType) || 0) + 1);
+    }
+    const byTypeRaw = Array.from(byTypeCounts, ([eventType, count]) => ({
+      eventType,
+      _count: { _all: count },
+    })).sort((a, b) => b._count._all - a._count._all);
     const bucketKey = (d) => {
       const iso = d.toISOString();
       if (bucket === 'minute') return iso.slice(0, 16); // YYYY-MM-DDTHH:MM
@@ -249,7 +324,7 @@ export async function registerApi(app) {
       return iso.slice(0, 10);                          // YYYY-MM-DD
     };
     const buckets = new Map();
-    for (const ev of rawEvents) {
+    for (const ev of processed) {
       const k = bucketKey(ev.receivedAt);
       let inner = buckets.get(k);
       if (!inner) {
@@ -665,6 +740,9 @@ async function buildEventFilter(user, q) {
   }
   if (q.eventType) where.eventType = q.eventType;
   if (q.bounceType) where.bounceType = q.bounceType;
+  if (q.subject) where.subject = { contains: q.subject };
+  if (q.mailFrom) where.mailFrom = { contains: q.mailFrom };
+  if (q.messageToken) where.messageToken = q.messageToken;
   if (q.rcptTo) where.rcptTo = { contains: q.rcptTo };
   if (q.from || q.to) {
     where.receivedAt = {};

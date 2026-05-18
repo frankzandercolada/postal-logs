@@ -13,14 +13,20 @@ const EVENT_TYPES = [
   'MessageLinkClicked',
 ];
 
+const EMPTY_FILTERS = {
+  clientId: '',
+  eventType: '',
+  rcptTo: '',
+  mailFrom: '',
+  subject: '',
+  messageToken: '',
+  from: '',
+  to: '',
+};
+
 export default function Events({ me }) {
-  const [filters, setFilters] = useState({
-    clientId: '',
-    eventType: '',
-    rcptTo: '',
-    from: '',
-    to: '',
-  });
+  const [filters, setFilters] = useState(EMPTY_FILTERS);
+  const [groupRetries, setGroupRetries] = useState(true);
   const [rows, setRows] = useState([]);
   const [loading, setLoading] = useState(false);
   const [cursor, setCursor] = useState(null);
@@ -33,6 +39,9 @@ export default function Events({ me }) {
       const params = Object.fromEntries(
         Object.entries(filters).filter(([, v]) => v),
       );
+      // Don't group when the user is drilling into a specific message.
+      const grouping = groupRetries && !filters.messageToken;
+      params.groupRetries = grouping ? '1' : '0';
       if (!reset && cursor) params.cursor = cursor;
       params.limit = 100;
       const data = await api.events(params);
@@ -47,11 +56,27 @@ export default function Events({ me }) {
   useEffect(() => {
     load(true);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [filters.clientId, filters.eventType, filters.from, filters.to]);
+  }, [
+    filters.clientId,
+    filters.eventType,
+    filters.from,
+    filters.to,
+    filters.messageToken,
+    groupRetries,
+  ]);
 
   function submit(e) {
     e.preventDefault();
     load(true);
+  }
+
+  function clearFilters() {
+    setFilters(EMPTY_FILTERS);
+  }
+
+  function drillIntoToken(token) {
+    setFilters({ ...EMPTY_FILTERS, messageToken: token });
+    setGroupRetries(false);
   }
 
   function csvUrl() {
@@ -76,6 +101,22 @@ export default function Events({ me }) {
           Export CSV
         </a>
       </div>
+
+      {/* drill-down breadcrumb */}
+      {filters.messageToken && (
+        <div className="bg-accent/10 border border-accent/30 rounded p-3 text-sm flex items-center justify-between">
+          <div>
+            <span className="text-muted">Showing all events for message token</span>{' '}
+            <code className="font-mono text-xs">{filters.messageToken}</code>
+          </div>
+          <button
+            onClick={clearFilters}
+            className="text-xs px-2 py-1 rounded bg-border hover:bg-border/70"
+          >
+            clear
+          </button>
+        </div>
+      )}
 
       <form
         onSubmit={submit}
@@ -112,11 +153,35 @@ export default function Events({ me }) {
           onChange={(e) => setFilters({ ...filters, to: e.target.value })}
           className="bg-bg border border-border rounded-md px-3 py-2 text-sm"
         />
+        <input
+          type="search"
+          placeholder="sender (from) contains…"
+          value={filters.mailFrom}
+          onChange={(e) => setFilters({ ...filters, mailFrom: e.target.value })}
+          className="bg-bg border border-border rounded-md px-3 py-2 text-sm md:col-span-3"
+        />
+        <input
+          type="search"
+          placeholder="subject contains…"
+          value={filters.subject}
+          onChange={(e) => setFilters({ ...filters, subject: e.target.value })}
+          className="bg-bg border border-border rounded-md px-3 py-2 text-sm md:col-span-3"
+        />
+        <div className="md:col-span-4 flex items-center gap-3 text-sm">
+          <label className="flex items-center gap-2 text-muted">
+            <input
+              type="checkbox"
+              checked={groupRetries}
+              onChange={(e) => setGroupRetries(e.target.checked)}
+            />
+            group Delayed retries by message
+          </label>
+        </div>
         <button
           type="submit"
-          className="md:col-span-6 px-3 py-2 rounded-md bg-border hover:bg-border/70 text-sm"
+          className="md:col-span-2 px-3 py-2 rounded-md bg-border hover:bg-border/70 text-sm"
         >
-          Apply filters
+          Apply text search
         </button>
       </form>
 
@@ -127,6 +192,7 @@ export default function Events({ me }) {
               <tr>
                 <th className="text-left font-normal px-3 py-2">Received</th>
                 <th className="text-left font-normal px-3 py-2">Event</th>
+                <th className="text-left font-normal px-3 py-2">From</th>
                 <th className="text-left font-normal px-3 py-2">Recipient</th>
                 <th className="text-left font-normal px-3 py-2">Subject</th>
                 <th className="text-left font-normal px-3 py-2">Status</th>
@@ -141,10 +207,30 @@ export default function Events({ me }) {
                 >
                   <td className="px-3 py-2 font-mono text-xs whitespace-nowrap">
                     {new Date(r.receivedAt).toLocaleString()}
+                    {r.firstRetryAt && r.retryCount > 1 && (
+                      <div className="text-muted">
+                        first: {new Date(r.firstRetryAt).toLocaleString()}
+                      </div>
+                    )}
                   </td>
                   <td className="px-3 py-2">
-                    <EventBadge type={r.eventType} bounceType={r.bounceType} />
+                    <div className="flex items-center gap-1.5">
+                      <EventBadge type={r.eventType} bounceType={r.bounceType} />
+                      {r.retryCount > 1 && (
+                        <button
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            drillIntoToken(r.messageToken);
+                          }}
+                          title="show all retries for this message"
+                          className="text-[10px] px-1.5 py-0.5 rounded bg-warn/15 text-warn font-mono hover:bg-warn/25"
+                        >
+                          × {r.retryCount}
+                        </button>
+                      )}
+                    </div>
                   </td>
+                  <td className="px-3 py-2 font-mono text-xs">{r.mailFrom || '—'}</td>
                   <td className="px-3 py-2 font-mono text-xs">{r.rcptTo || '—'}</td>
                   <td className="px-3 py-2 text-muted truncate max-w-xs">
                     {r.subject || '—'}
@@ -154,7 +240,7 @@ export default function Events({ me }) {
               ))}
               {!loading && rows.length === 0 && (
                 <tr>
-                  <td colSpan={5} className="px-3 py-8 text-center text-muted">
+                  <td colSpan={6} className="px-3 py-8 text-center text-muted">
                     No events match these filters.
                   </td>
                 </tr>

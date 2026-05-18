@@ -35,7 +35,14 @@ export default function Dashboard({ me }) {
     setData(null);
     setErr(null);
     api
-      .summary({ clientId, minutes: range.minutes, bucket: range.bucket })
+      .summary({
+        clientId,
+        minutes: range.minutes,
+        bucket: range.bucket,
+        // Always dedup MessageDelayed retries on the dashboard. The Events
+        // tab is where you go for the un-collapsed history.
+        groupRetries: 1,
+      })
       .then(setData)
       .catch((e) => setErr(String(e)));
   }, [clientId, rangeIdx]);
