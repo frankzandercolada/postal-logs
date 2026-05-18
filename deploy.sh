@@ -33,6 +33,12 @@ case "$cmd" in
   update)
     require_env
     git pull --ff-only || true
+    # The app container runs as the `node` user (UID 1000). Make sure the
+    # bind-mounted data dir is writable by it, otherwise SQLite init fails.
+    mkdir -p data
+    if [[ "$(stat -c %u data 2>/dev/null || stat -f %u data)" != "1000" ]]; then
+      sudo chown -R 1000:1000 data
+    fi
     docker compose pull || true
     docker compose up -d --build
     sleep 3

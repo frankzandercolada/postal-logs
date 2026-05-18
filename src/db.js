@@ -25,12 +25,24 @@ export async function ensureDb() {
 }
 
 export async function runMigrations() {
-  // Run prisma migrate deploy. In dev there might not be migrations yet, so
-  // fall back to db push which creates the schema directly.
-  try {
+  // If there are no committed migrations, push the schema directly. Otherwise
+  // apply migrations. (`prisma migrate deploy` exits 0 even with no migrations
+  // present, so a try/catch around it would never trigger the fallback.)
+  const migrationsDir = path.resolve('prisma/migrations');
+  const hasMigrations =
+    fs.existsSync(migrationsDir) &&
+    fs.readdirSync(migrationsDir).some((entry) => {
+      try {
+        return fs.statSync(path.join(migrationsDir, entry)).isDirectory();
+      } catch {
+        return false;
+      }
+    });
+
+  if (hasMigrations) {
     execSync('npx prisma migrate deploy', { stdio: 'inherit' });
-  } catch (err) {
-    console.warn('prisma migrate deploy failed, falling back to db push:', err.message);
+  } else {
+    console.log('no committed migrations; running prisma db push to create schema');
     execSync('npx prisma db push --skip-generate', { stdio: 'inherit' });
   }
 
