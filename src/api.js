@@ -2,7 +2,7 @@ import { prisma } from './db.js';
 import {
   requireAuth,
   requireStaff,
-  accessibleClientIds,
+  accessibleScope,
   hashPassword,
   verifyPassword,
   MIN_PASSWORD_LEN,
@@ -47,10 +47,15 @@ export async function registerApi(app) {
   app.get('/api/clients', async (req, reply) => {
     const u = requireAuth(req, reply);
     if (!u) return;
-    const ids = await accessibleClientIds(u);
+    const scope = await accessibleScope(u);
     return prisma.client.findMany({
-      where: { id: { in: ids }, archivedAt: null },
-      include: { mailServers: { select: { id: true, name: true } } },
+      where: { id: { in: scope.clientIds }, archivedAt: null },
+      include: {
+        mailServers: {
+          where: scope.isStaff ? {} : { id: { in: scope.mailServerIds } },
+          select: { id: true, name: true },
+        },
+      },
       orderBy: { name: 'asc' },
     });
   });
@@ -93,9 +98,9 @@ export async function registerApi(app) {
   app.get('/api/events/:id', async (req, reply) => {
     const u = requireAuth(req, reply);
     if (!u) return;
-    const ids = await accessibleClientIds(u);
+    const scope = await accessibleScope(u);
     const ev = await prisma.event.findUnique({ where: { id: req.params.id } });
-    if (!ev || !ids.includes(ev.clientId)) {
+    if (!ev || (!scope.isStaff && !scope.mailServerIds.includes(ev.mailServerId))) {
       return reply.code(404).send({ error: 'not_found' });
     }
     return { ...ev, rawJson: safeJsonParse(ev.rawJson) };
@@ -180,10 +185,24 @@ export async function registerApi(app) {
   app.get('/api/stats/summary', async (req, reply) => {
     const u = requireAuth(req, reply);
     if (!u) return;
-    const ids = await accessibleClientIds(u);
+    const scope = await accessibleScope(u);
     const clientId = req.query.clientId;
-    const targetIds = clientId ? [clientId].filter((id) => ids.includes(id)) : ids;
-    if (targetIds.length === 0) {
+    const targetClientIds = clientId
+      ? [clientId].filter((id) => scope.clientIds.includes(id))
+      : scope.clientIds;
+    if (targetClientIds.length === 0 || scope.mailServerIds.length === 0) {
+      return { byType: [], byBucket: [], topBounces: [], bucket: 'day' };
+    }
+    // Mail servers within the targeted clients AND within the user's scope.
+    const targetMs = await prisma.mailServer.findMany({
+      where: {
+        clientId: { in: targetClientIds },
+        ...(scope.isStaff ? {} : { id: { in: scope.mailServerIds } }),
+      },
+      select: { id: true },
+    });
+    const mailServerIds = targetMs.map((m) => m.id);
+    if (mailServerIds.length === 0) {
       return { byType: [], byBucket: [], topBounces: [], bucket: 'day' };
     }
 
@@ -210,7 +229,7 @@ export async function registerApi(app) {
     // Counts by event type within the window — live from raw events.
     const byTypeRaw = await prisma.event.groupBy({
       by: ['eventType'],
-      where: { clientId: { in: targetIds }, receivedAt: { gte: since } },
+      where: { mailServerId: { in: mailServerIds }, receivedAt: { gte: since } },
       _count: { _all: true },
       orderBy: { _count: { eventType: 'desc' } },
     });
@@ -219,17 +238,17 @@ export async function registerApi(app) {
     // with substr() against the ISO8601 receivedAt. UTC throughout — frontend
     // formats for display.
     const bucketLen = bucket === 'day' ? 10 : bucket === 'hour' ? 13 : 16;
-    const placeholders = targetIds.map(() => '?').join(',');
+    const placeholders = mailServerIds.map(() => '?').join(',');
     const byBucketRows = await prisma.$queryRawUnsafe(
       `SELECT substr(receivedAt, 1, ${bucketLen}) AS bucket,
               eventType,
               COUNT(*) AS count
          FROM Event
-        WHERE clientId IN (${placeholders})
+        WHERE mailServerId IN (${placeholders})
           AND receivedAt >= ?
         GROUP BY bucket, eventType
         ORDER BY bucket ASC`,
-      ...targetIds,
+      ...mailServerIds,
       since.toISOString(),
     );
 
@@ -237,7 +256,7 @@ export async function registerApi(app) {
     const topBounces = await prisma.event.groupBy({
       by: ['details'],
       where: {
-        clientId: { in: targetIds },
+        mailServerId: { in: mailServerIds },
         bounceType: 'hard',
         receivedAt: { gte: since },
         details: { not: null },
@@ -264,13 +283,17 @@ export async function registerApi(app) {
   });
 
   // --- suppression list ---
+  // Suppression is per-client (dedup across mail servers); mail-server scope
+  // doesn't apply here. A user with any access to a client sees its list.
   app.get('/api/suppression', async (req, reply) => {
     const u = requireAuth(req, reply);
     if (!u) return;
-    const ids = await accessibleClientIds(u);
+    const { clientIds } = await accessibleScope(u);
     const clientId = req.query.clientId;
     const where = {
-      clientId: clientId ? { in: [clientId].filter((id) => ids.includes(id)) } : { in: ids },
+      clientId: clientId
+        ? { in: [clientId].filter((id) => clientIds.includes(id)) }
+        : { in: clientIds },
     };
     if (req.query.q) where.rcptTo = { contains: req.query.q };
     const take = Math.min(parseInt(req.query.limit || '200', 10), 1000);
@@ -284,10 +307,12 @@ export async function registerApi(app) {
   app.get('/api/suppression.csv', async (req, reply) => {
     const u = requireAuth(req, reply);
     if (!u) return;
-    const ids = await accessibleClientIds(u);
+    const { clientIds } = await accessibleScope(u);
     const clientId = req.query.clientId;
     const where = {
-      clientId: clientId ? { in: [clientId].filter((id) => ids.includes(id)) } : { in: ids },
+      clientId: clientId
+        ? { in: [clientId].filter((id) => clientIds.includes(id)) }
+        : { in: clientIds },
     };
 
     reply
@@ -466,7 +491,14 @@ export async function registerApi(app) {
   app.get('/api/admin/users', async (req, reply) => {
     if (!requireStaff(req, reply)) return;
     return prisma.user.findMany({
-      include: { memberships: { include: { client: true } } },
+      include: {
+        memberships: {
+          include: {
+            client: { include: { mailServers: { select: { id: true, name: true } } } },
+            mailServerScopes: { select: { mailServerId: true } },
+          },
+        },
+      },
       orderBy: { email: 'asc' },
     });
   });
@@ -559,13 +591,42 @@ export async function registerApi(app) {
 
   app.post('/api/admin/memberships', async (req, reply) => {
     if (!requireStaff(req, reply)) return;
-    const { userId, clientId, role } = req.body || {};
+    const { userId, clientId, role, mailServerIds } = req.body || {};
     if (!userId || !clientId || !role)
       return reply.code(400).send({ error: 'user_client_role_required' });
-    return prisma.membership.upsert({
-      where: { userId_clientId: { userId, clientId } },
-      create: { userId, clientId, role },
-      update: { role },
+
+    // If mailServerIds is provided (any array, including empty), it replaces
+    // the existing scope. An empty array means "all" — same as no scope rows.
+    // If mailServerIds is omitted entirely, existing scope rows are left
+    // alone (just update the role).
+    const wantsScopeUpdate = Array.isArray(mailServerIds);
+    let validated = [];
+    if (wantsScopeUpdate && mailServerIds.length > 0) {
+      const found = await prisma.mailServer.findMany({
+        where: { id: { in: mailServerIds }, clientId },
+        select: { id: true },
+      });
+      if (found.length !== mailServerIds.length) {
+        return reply.code(400).send({ error: 'mail_server_not_in_client' });
+      }
+      validated = found.map((m) => m.id);
+    }
+
+    return prisma.$transaction(async (tx) => {
+      const membership = await tx.membership.upsert({
+        where: { userId_clientId: { userId, clientId } },
+        create: { userId, clientId, role },
+        update: { role },
+      });
+      if (wantsScopeUpdate) {
+        await tx.membershipMailServer.deleteMany({ where: { userId, clientId } });
+        if (validated.length > 0) {
+          await tx.membershipMailServer.createMany({
+            data: validated.map((mailServerId) => ({ userId, clientId, mailServerId })),
+          });
+        }
+      }
+      return membership;
     });
   });
 
@@ -587,10 +648,12 @@ function webhookUrlFor(token) {
 }
 
 async function buildEventFilter(user, q) {
-  const ids = await accessibleClientIds(user);
-  const where = { clientId: { in: ids } };
-  if (q.clientId && ids.includes(q.clientId)) where.clientId = q.clientId;
-  if (q.mailServerId) where.mailServerId = q.mailServerId;
+  const scope = await accessibleScope(user);
+  const where = { mailServerId: { in: scope.mailServerIds } };
+  if (q.clientId && scope.clientIds.includes(q.clientId)) where.clientId = q.clientId;
+  if (q.mailServerId && scope.mailServerIds.includes(q.mailServerId)) {
+    where.mailServerId = q.mailServerId;
+  }
   if (q.eventType) where.eventType = q.eventType;
   if (q.bounceType) where.bounceType = q.bounceType;
   if (q.rcptTo) where.rcptTo = { contains: q.rcptTo };

@@ -45,6 +45,7 @@ model MailServer {
 
   events          Event[]
   stats           StatDaily[]
+  membershipScopes MembershipMailServer[]
 
   @@index([clientId])
 }
@@ -70,9 +71,25 @@ model Membership {
 
   user      User   @relation(fields: [userId], references: [id], onDelete: Cascade)
   client    Client @relation(fields: [clientId], references: [id], onDelete: Cascade)
+  // Optional per-mail-server scoping. If no rows exist for this (user,
+  // client) pair, the user can see ALL mail servers in the client (default).
+  // If rows exist, the user is restricted to exactly those mail servers.
+  mailServerScopes MembershipMailServer[]
 
   @@id([userId, clientId])
   @@index([clientId])
+}
+
+model MembershipMailServer {
+  userId       String
+  clientId     String
+  mailServerId String
+
+  membership Membership @relation(fields: [userId, clientId], references: [userId, clientId], onDelete: Cascade)
+  mailServer MailServer @relation(fields: [mailServerId], references: [id], onDelete: Cascade)
+
+  @@id([userId, clientId, mailServerId])
+  @@index([mailServerId])
 }
 
 model Session {

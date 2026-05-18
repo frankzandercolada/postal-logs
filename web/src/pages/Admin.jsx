@@ -377,8 +377,10 @@ function Users() {
     }
   }
 
-  async function addMembership(userId, clientId, role) {
-    await api.adminUpsertMembership({ userId, clientId, role });
+  async function addMembership(userId, clientId, role, mailServerIds) {
+    const body = { userId, clientId, role };
+    if (Array.isArray(mailServerIds)) body.mailServerIds = mailServerIds;
+    await api.adminUpsertMembership(body);
     refresh();
   }
 
@@ -478,30 +480,145 @@ function Users() {
                 <div className="text-xs text-muted">No client access.</div>
               )}
               {u.memberships.map((m) => (
-                <div key={m.clientId} className="flex items-center gap-2 text-sm">
-                  <span className="flex-1">{m.client.name}</span>
-                  <select
-                    value={m.role}
-                    onChange={(e) => addMembership(u.id, m.clientId, e.target.value)}
-                    className="bg-bg border border-border rounded px-2 py-1 text-xs"
-                  >
-                    <option value="viewer">viewer</option>
-                    <option value="admin">admin</option>
-                    <option value="owner">owner</option>
-                  </select>
-                  <button
-                    onClick={() => removeMembership(u.id, m.clientId)}
-                    className="text-xs text-muted hover:text-bad"
-                  >
-                    remove
-                  </button>
-                </div>
+                <MembershipRow
+                  key={m.clientId}
+                  user={u}
+                  membership={m}
+                  onChangeRole={(role) => addMembership(u.id, m.clientId, role)}
+                  onChangeScope={(ids) => addMembership(u.id, m.clientId, m.role, ids)}
+                  onRemove={() => removeMembership(u.id, m.clientId)}
+                />
               ))}
               <AddMembership user={u} clients={clients} onAdd={addMembership} />
             </div>
           )}
         </div>
       ))}
+    </div>
+  );
+}
+
+function MembershipRow({ membership, onChangeRole, onChangeScope, onRemove }) {
+  const [editingScope, setEditingScope] = useState(false);
+  const mailServers = membership.client.mailServers || [];
+  const scopedIds = new Set((membership.mailServerScopes || []).map((s) => s.mailServerId));
+  const isUnrestricted = scopedIds.size === 0;
+
+  return (
+    <div className="bg-bg/30 border border-border/60 rounded px-2 py-1.5 text-sm">
+      <div className="flex items-center gap-2">
+        <span className="flex-1">{membership.client.name}</span>
+        <select
+          value={membership.role}
+          onChange={(e) => onChangeRole(e.target.value)}
+          className="bg-bg border border-border rounded px-2 py-1 text-xs"
+        >
+          <option value="viewer">viewer</option>
+          <option value="admin">admin</option>
+          <option value="owner">owner</option>
+        </select>
+        <button
+          onClick={() => setEditingScope(!editingScope)}
+          className="text-xs px-2 py-1 rounded bg-border hover:bg-border/70"
+        >
+          {editingScope ? 'cancel' : 'scope'}
+        </button>
+        <button
+          onClick={onRemove}
+          className="text-xs text-muted hover:text-bad"
+        >
+          remove
+        </button>
+      </div>
+      <div className="text-xs text-muted mt-1">
+        mail servers:&nbsp;
+        {mailServers.length === 0 ? (
+          <span>(none yet on this client)</span>
+        ) : isUnrestricted ? (
+          <span>all ({mailServers.length})</span>
+        ) : (
+          <span>
+            {mailServers
+              .filter((ms) => scopedIds.has(ms.id))
+              .map((ms) => ms.name)
+              .join(', ')}
+          </span>
+        )}
+      </div>
+      {editingScope && (
+        <MailServerScopePicker
+          mailServers={mailServers}
+          initial={scopedIds}
+          onCancel={() => setEditingScope(false)}
+          onSave={(ids) => {
+            // Empty selection = "all" (no scope rows).
+            onChangeScope(ids);
+            setEditingScope(false);
+          }}
+        />
+      )}
+    </div>
+  );
+}
+
+function MailServerScopePicker({ mailServers, initial, onSave, onCancel }) {
+  const [selected, setSelected] = useState(new Set(initial));
+  const [allMode, setAllMode] = useState(initial.size === 0);
+
+  function toggle(id) {
+    setAllMode(false);
+    setSelected((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  }
+
+  return (
+    <div className="mt-2 bg-bg border border-border rounded p-2 space-y-2">
+      <label className="flex items-center gap-2 text-xs">
+        <input
+          type="checkbox"
+          checked={allMode}
+          onChange={(e) => {
+            setAllMode(e.target.checked);
+            if (e.target.checked) setSelected(new Set());
+          }}
+        />
+        all mail servers (including ones added later)
+      </label>
+      {!allMode && (
+        <div className="space-y-1">
+          {mailServers.length === 0 && (
+            <div className="text-xs text-muted">No mail servers on this client yet.</div>
+          )}
+          {mailServers.map((ms) => (
+            <label key={ms.id} className="flex items-center gap-2 text-xs">
+              <input
+                type="checkbox"
+                checked={selected.has(ms.id)}
+                onChange={() => toggle(ms.id)}
+              />
+              {ms.name}
+            </label>
+          ))}
+        </div>
+      )}
+      <div className="flex justify-end gap-1">
+        <button
+          onClick={onCancel}
+          className="text-xs px-2 py-1 rounded bg-border hover:bg-border/70"
+        >
+          cancel
+        </button>
+        <button
+          onClick={() => onSave(allMode ? [] : Array.from(selected))}
+          className="text-xs px-2 py-1 rounded bg-accent text-bg"
+        >
+          save
+        </button>
+      </div>
     </div>
   );
 }
@@ -542,6 +659,9 @@ function AddMembership({ user, clients, onAdd }) {
       >
         add
       </button>
+      <span className="text-xs text-muted">
+        (mail-server scope is set after adding)
+      </span>
     </div>
   );
 }

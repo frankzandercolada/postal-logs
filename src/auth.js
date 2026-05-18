@@ -138,20 +138,65 @@ export function requireStaff(req, reply) {
 }
 
 /**
- * Returns the set of client IDs the user can see. Staff can see everything.
- * Non-staff users only see clients they have a membership for.
+ * Returns what a user can see, scoped to both clients and mail servers.
+ *
+ *   { isStaff, clientIds, mailServerIds }
+ *
+ * Staff: clientIds = all non-archived clients, mailServerIds = all mail servers.
+ *
+ * Non-staff: derived from their Memberships. For each membership, if
+ * MembershipMailServer rows exist, the user is restricted to that subset of
+ * the client's mail servers; otherwise they see all mail servers in the
+ * client. `mailServerIds` is the union resolved to explicit IDs so call
+ * sites can filter with a single `mailServerId: { in: [...] }`.
  */
-export async function accessibleClientIds(user) {
+export async function accessibleScope(user) {
   if (user.isStaff) {
-    const clients = await prisma.client.findMany({
-      where: { archivedAt: null },
-      select: { id: true },
-    });
-    return clients.map((c) => c.id);
+    const [clients, mailServers] = await Promise.all([
+      prisma.client.findMany({ where: { archivedAt: null }, select: { id: true } }),
+      prisma.mailServer.findMany({ select: { id: true } }),
+    ]);
+    return {
+      isStaff: true,
+      clientIds: clients.map((c) => c.id),
+      mailServerIds: mailServers.map((m) => m.id),
+    };
   }
+
   const memberships = await prisma.membership.findMany({
     where: { userId: user.id },
-    select: { clientId: true },
+    include: { mailServerScopes: { select: { mailServerId: true } } },
   });
-  return memberships.map((m) => m.clientId);
+
+  const explicit = new Set();
+  const unrestrictedClientIds = [];
+  for (const m of memberships) {
+    if (m.mailServerScopes.length > 0) {
+      for (const s of m.mailServerScopes) explicit.add(s.mailServerId);
+    } else {
+      unrestrictedClientIds.push(m.clientId);
+    }
+  }
+  if (unrestrictedClientIds.length > 0) {
+    const ms = await prisma.mailServer.findMany({
+      where: { clientId: { in: unrestrictedClientIds } },
+      select: { id: true },
+    });
+    for (const r of ms) explicit.add(r.id);
+  }
+
+  return {
+    isStaff: false,
+    clientIds: memberships.map((m) => m.clientId),
+    mailServerIds: Array.from(explicit),
+  };
+}
+
+/**
+ * Back-compat shim — some call sites only need the client list. Prefer
+ * `accessibleScope` for new code.
+ */
+export async function accessibleClientIds(user) {
+  const scope = await accessibleScope(user);
+  return scope.clientIds;
 }
