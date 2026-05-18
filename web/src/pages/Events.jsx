@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import { api } from '../api.js';
-import { ClientFilter } from './Dashboard.jsx';
+import { ClientFilter, MailServerFilter } from './Dashboard.jsx';
 
 const EVENT_TYPES = [
   '',
@@ -15,6 +15,7 @@ const EVENT_TYPES = [
 
 const EMPTY_FILTERS = {
   clientId: '',
+  mailServerId: '',
   eventType: '',
   rcptTo: '',
   mailFrom: '',
@@ -32,6 +33,17 @@ export default function Events({ me }) {
   const [cursor, setCursor] = useState(null);
   const [hasMore, setHasMore] = useState(false);
   const [selected, setSelected] = useState(null);
+  const [clientsWithServers, setClientsWithServers] = useState([]);
+
+  useEffect(() => {
+    api.clients().then(setClientsWithServers).catch(() => {});
+  }, []);
+
+  // Reset mail server when client changes.
+  useEffect(() => {
+    if (filters.mailServerId) setFilters((f) => ({ ...f, mailServerId: '' }));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [filters.clientId]);
 
   async function load(reset = true) {
     setLoading(true);
@@ -58,6 +70,7 @@ export default function Events({ me }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [
     filters.clientId,
+    filters.mailServerId,
     filters.eventType,
     filters.from,
     filters.to,
@@ -123,6 +136,12 @@ export default function Events({ me }) {
         className="bg-panel border border-border rounded-lg p-4 grid grid-cols-2 md:grid-cols-6 gap-3"
       >
         <ClientFilter me={me} value={filters.clientId} onChange={(v) => setFilters({ ...filters, clientId: v })} />
+        <MailServerFilter
+          clients={clientsWithServers}
+          clientId={filters.clientId}
+          value={filters.mailServerId}
+          onChange={(v) => setFilters({ ...filters, mailServerId: v })}
+        />
         <select
           value={filters.eventType}
           onChange={(e) => setFilters({ ...filters, eventType: e.target.value })}

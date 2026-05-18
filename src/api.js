@@ -242,17 +242,30 @@ export async function registerApi(app) {
     if (!u) return;
     const scope = await accessibleScope(u);
     const clientId = req.query.clientId;
+    const mailServerId = req.query.mailServerId;
     const targetClientIds = clientId
       ? [clientId].filter((id) => scope.clientIds.includes(id))
       : scope.clientIds;
     if (targetClientIds.length === 0 || scope.mailServerIds.length === 0) {
       return { byType: [], byBucket: [], topBounces: [], bucket: 'day' };
     }
+    // Validate explicit mailServerId is within scope.
+    if (
+      mailServerId &&
+      !scope.isStaff &&
+      !scope.mailServerIds.includes(mailServerId)
+    ) {
+      return { byType: [], byBucket: [], topBounces: [], bucket: 'day' };
+    }
     // Mail servers within the targeted clients AND within the user's scope.
     const targetMs = await prisma.mailServer.findMany({
       where: {
         clientId: { in: targetClientIds },
-        ...(scope.isStaff ? {} : { id: { in: scope.mailServerIds } }),
+        ...(mailServerId
+          ? { id: mailServerId }
+          : scope.isStaff
+          ? {}
+          : { id: { in: scope.mailServerIds } }),
       },
       select: { id: true },
     });

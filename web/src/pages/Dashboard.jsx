@@ -23,6 +23,8 @@ const COLOR_FOR = (type) => {
 
 export default function Dashboard({ me }) {
   const [clientId, setClientId] = useState('');
+  const [mailServerId, setMailServerId] = useState('');
+  const [clientsWithServers, setClientsWithServers] = useState([]);
   const [rangeIdx, setRangeIdx] = useState(3); // default: last 7 days
   const [data, setData] = useState(null);
   const [err, setErr] = useState(null);
@@ -31,12 +33,24 @@ export default function Dashboard({ me }) {
 
   const range = RANGES[rangeIdx];
 
+  // Load mail servers once for the filter dropdown.
+  useEffect(() => {
+    api.clients().then(setClientsWithServers).catch(() => {});
+  }, []);
+
+  // Reset mail server when client changes, in case the previous server
+  // doesn't belong to the new client.
+  useEffect(() => {
+    setMailServerId('');
+  }, [clientId]);
+
   useEffect(() => {
     setData(null);
     setErr(null);
     api
       .summary({
         clientId,
+        mailServerId,
         minutes: range.minutes,
         bucket: range.bucket,
         // Always dedup MessageDelayed retries on the dashboard. The Events
@@ -45,7 +59,7 @@ export default function Dashboard({ me }) {
       })
       .then(setData)
       .catch((e) => setErr(String(e)));
-  }, [clientId, rangeIdx]);
+  }, [clientId, mailServerId, rangeIdx]);
 
   function toggleHidden(type) {
     setHidden((prev) => {
@@ -65,8 +79,14 @@ export default function Dashboard({ me }) {
             Webhook events from your Postal mail servers.
           </p>
         </div>
-        <div className="flex items-center gap-2">
+        <div className="flex items-center gap-2 flex-wrap">
           <ClientFilter me={me} value={clientId} onChange={setClientId} />
+          <MailServerFilter
+            clients={clientsWithServers}
+            clientId={clientId}
+            value={mailServerId}
+            onChange={setMailServerId}
+          />
           <select
             value={rangeIdx}
             onChange={(e) => setRangeIdx(parseInt(e.target.value, 10))}
@@ -328,6 +348,41 @@ export function ClientFilter({ me, value, onChange }) {
       {clients.map((c) => (
         <option key={c.id} value={c.id}>
           {c.name}
+        </option>
+      ))}
+    </select>
+  );
+}
+
+/**
+ * Dropdown of mail servers. When a specific client is selected, lists only
+ * its servers; otherwise lists every server across all accessible clients
+ * with a "client — server" label so duplicates from different clients are
+ * disambiguated.
+ *
+ * `clients` is the response from /api/clients (with mailServers included).
+ */
+export function MailServerFilter({ clients, clientId, value, onChange }) {
+  const all = clients || [];
+  const scoped = clientId ? all.filter((c) => c.id === clientId) : all;
+  const flat = [];
+  for (const c of scoped) {
+    for (const ms of c.mailServers || []) {
+      flat.push({ id: ms.id, label: clientId ? ms.name : `${c.name} — ${ms.name}` });
+    }
+  }
+  // Hide when there's only one mail server in scope — no point selecting it.
+  if (flat.length <= 1) return null;
+  return (
+    <select
+      value={value}
+      onChange={(e) => onChange(e.target.value)}
+      className="bg-panel border border-border rounded-md px-3 py-2 text-sm"
+    >
+      <option value="">All mail servers</option>
+      {flat.map((m) => (
+        <option key={m.id} value={m.id}>
+          {m.label}
         </option>
       ))}
     </select>
