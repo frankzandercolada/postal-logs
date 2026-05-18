@@ -1,0 +1,31 @@
+{
+	email {$ACME_EMAIL}
+}
+
+{$HOSTNAME} {
+	encode zstd gzip
+
+	# Larger body limit for webhook payloads
+	request_body {
+		max_size 5MB
+	}
+
+	reverse_proxy app:3000 {
+		header_up X-Real-IP {remote_host}
+		header_up X-Forwarded-For {remote_host}
+		header_up X-Forwarded-Proto {scheme}
+	}
+
+	# Basic security headers (the app sets more granular ones)
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		X-Content-Type-Options "nosniff"
+		Referrer-Policy "strict-origin-when-cross-origin"
+		-Server
+	}
+
+	log {
+		output stdout
+		format console
+	}
+}

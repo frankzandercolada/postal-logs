@@ -1,0 +1,13 @@
+node_modules
+web/node_modules
+web/dist
+public
+data
+.env
+.env.*
+!.env.example
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+.DS_Store

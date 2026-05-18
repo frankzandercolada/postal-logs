@@ -1,0 +1,144 @@
+// Datasource is SQLite. To migrate to Postgres later, change provider and
+// the connection string in DATABASE_URL.
+
+generator client {
+  provider      = "prisma-client-js"
+  // native = whatever Prisma detects on the build host (handy for local dev).
+  // The musl targets are required because the container image is Alpine.
+  binaryTargets = ["native", "linux-musl-openssl-3.0.x", "linux-musl"]
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+model Client {
+  id          String   @id @default(cuid())
+  name        String
+  slug        String   @unique
+  createdAt   DateTime @default(now())
+  archivedAt  DateTime?
+
+  mailServers MailServer[]
+  memberships Membership[]
+  events      Event[]
+  stats       StatDaily[]
+  suppression Suppression[]
+}
+
+model MailServer {
+  id              String   @id @default(cuid())
+  clientId        String
+  client          Client   @relation(fields: [clientId], references: [id], onDelete: Cascade)
+  name            String
+  postalServerId  Int?     // the numeric id in your Postal install, optional
+  webhookToken    String   @unique // path segment in the webhook URL
+  publicKeyPem    String   // for verifying X-Postal-Signature
+  createdAt       DateTime @default(now())
+
+  events          Event[]
+  stats           StatDaily[]
+
+  @@index([clientId])
+}
+
+model User {
+  id            String   @id @default(cuid())
+  email         String   @unique
+  name          String?
+  googleSub     String?  @unique
+  isStaff       Boolean  @default(false) // internal staff: can manage everything
+  createdAt     DateTime @default(now())
+  lastLoginAt   DateTime?
+
+  memberships   Membership[]
+  sessions      Session[]
+}
+
+model Membership {
+  userId    String
+  clientId  String
+  role      String   // owner | admin | viewer
+  createdAt DateTime @default(now())
+
+  user      User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+  client    Client @relation(fields: [clientId], references: [id], onDelete: Cascade)
+
+  @@id([userId, clientId])
+  @@index([clientId])
+}
+
+model Session {
+  id        String   @id // random token from cookie
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  createdAt DateTime @default(now())
+  expiresAt DateTime
+
+  @@index([userId])
+  @@index([expiresAt])
+}
+
+model Event {
+  id                String   @id @default(cuid())
+  mailServerId      String
+  clientId          String   // denormalized for fast tenant-scoped queries
+  eventType         String   // MessageSent | MessageBounced | MessageDeliveryFailed | ...
+  receivedAt        DateTime @default(now()) // when WE got the webhook
+  postalTimestamp   DateTime?                 // when Postal claims the event happened
+
+  // Extracted convenience columns for filtering
+  messageToken      String?
+  messageId         Int?
+  rcptTo            String?
+  mailFrom          String?
+  subject           String?
+  status            String?
+  bounceType        String?  // hard | soft | null
+  details           String?
+
+  // Full payload for forensic queries / detail view
+  rawJson           String   // JSON text
+
+  // Idempotency: Postal sends a UUID per webhook delivery
+  postalUuid        String?  @unique
+
+  mailServer        MailServer @relation(fields: [mailServerId], references: [id], onDelete: Cascade)
+  client            Client     @relation(fields: [clientId], references: [id], onDelete: Cascade)
+
+  @@index([clientId, receivedAt])
+  @@index([clientId, eventType, receivedAt])
+  @@index([mailServerId, receivedAt])
+  @@index([rcptTo])
+  @@index([receivedAt]) // for retention sweep
+}
+
+model StatDaily {
+  date          String   // YYYY-MM-DD in UTC
+  clientId      String
+  mailServerId  String
+  eventType     String
+  count         Int      @default(0)
+
+  client        Client     @relation(fields: [clientId], references: [id], onDelete: Cascade)
+  mailServer    MailServer @relation(fields: [mailServerId], references: [id], onDelete: Cascade)
+
+  @@id([date, clientId, mailServerId, eventType])
+  @@index([clientId, date])
+}
+
+model Suppression {
+  id            String   @id @default(cuid())
+  clientId      String
+  rcptTo        String
+  reason        String?
+  firstSeenAt   DateTime @default(now())
+  lastSeenAt    DateTime @default(now())
+  eventCount    Int      @default(1)
+
+  client        Client @relation(fields: [clientId], references: [id], onDelete: Cascade)
+
+  @@unique([clientId, rcptTo])
+  @@index([clientId])
+}
