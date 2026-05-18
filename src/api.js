@@ -234,23 +234,37 @@ export async function registerApi(app) {
       orderBy: { _count: { eventType: 'desc' } },
     });
 
-    // Prisma's groupBy can't group on a derived column, so use $queryRawUnsafe
-    // with substr() against the ISO8601 receivedAt. UTC throughout — frontend
-    // formats for display.
-    const bucketLen = bucket === 'day' ? 10 : bucket === 'hour' ? 13 : 16;
-    const placeholders = mailServerIds.map(() => '?').join(',');
-    const byBucketRows = await prisma.$queryRawUnsafe(
-      `SELECT substr(receivedAt, 1, ${bucketLen}) AS bucket,
-              eventType,
-              COUNT(*) AS count
-         FROM Event
-        WHERE mailServerId IN (${placeholders})
-          AND receivedAt >= ?
-        GROUP BY bucket, eventType
-        ORDER BY bucket ASC`,
-      ...mailServerIds,
-      since.toISOString(),
-    );
+    // Bucket events in JS. Prisma's groupBy can't group on a derived column,
+    // and SQL date functions on SQLite vary depending on how Prisma stores
+    // the DateTime (numeric ms vs ISO text). Going through Date objects in
+    // JS sidesteps all of that and is plenty fast for typical volumes.
+    const rawEvents = await prisma.event.findMany({
+      where: { mailServerId: { in: mailServerIds }, receivedAt: { gte: since } },
+      select: { receivedAt: true, eventType: true },
+    });
+    const bucketKey = (d) => {
+      const iso = d.toISOString();
+      if (bucket === 'minute') return iso.slice(0, 16); // YYYY-MM-DDTHH:MM
+      if (bucket === 'hour') return iso.slice(0, 13);   // YYYY-MM-DDTHH
+      return iso.slice(0, 10);                          // YYYY-MM-DD
+    };
+    const buckets = new Map();
+    for (const ev of rawEvents) {
+      const k = bucketKey(ev.receivedAt);
+      let inner = buckets.get(k);
+      if (!inner) {
+        inner = new Map();
+        buckets.set(k, inner);
+      }
+      inner.set(ev.eventType, (inner.get(ev.eventType) || 0) + 1);
+    }
+    const byBucketRows = [];
+    for (const [k, inner] of buckets) {
+      for (const [eventType, count] of inner) {
+        byBucketRows.push({ bucket: k, eventType, count });
+      }
+    }
+    byBucketRows.sort((a, b) => (a.bucket < b.bucket ? -1 : a.bucket > b.bucket ? 1 : 0));
 
     // Top bounce reasons within the same window.
     const topBounces = await prisma.event.groupBy({
@@ -269,12 +283,7 @@ export async function registerApi(app) {
     return {
       bucket,
       byType: byTypeRaw.map((r) => ({ eventType: r.eventType, count: r._count._all })),
-      byBucket: byBucketRows.map((r) => ({
-        bucket: r.bucket,
-        eventType: r.eventType,
-        // SQLite returns COUNT(*) as a BigInt under $queryRaw — coerce.
-        count: typeof r.count === 'bigint' ? Number(r.count) : r.count,
-      })),
+      byBucket: byBucketRows,
       topBounces: topBounces.map((r) => ({
         reason: r.details,
         count: r._count._all,
