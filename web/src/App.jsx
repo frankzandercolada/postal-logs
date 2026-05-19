@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react';
+import { createPortal } from 'react-dom';
 import { Routes, Route, NavLink, Navigate, useNavigate } from 'react-router-dom';
 import { api } from './api.js';
 import Login from './pages/Login.jsx';
@@ -117,7 +118,10 @@ function ChangePasswordModal({ onClose }) {
     }
   }
 
-  return (
+  // Render into <body> via a portal. Otherwise the header's backdrop-filter
+  // becomes a containing block for our `fixed` element and clips the modal
+  // to the header's height.
+  return createPortal(
     <div
       className="fixed inset-0 bg-black/60 flex items-center justify-center z-50 px-6"
       onClick={onClose}
@@ -177,7 +181,8 @@ function ChangePasswordModal({ onClose }) {
           </button>
         </div>
       </form>
-    </div>
+    </div>,
+    document.body,
   );
 }
 
