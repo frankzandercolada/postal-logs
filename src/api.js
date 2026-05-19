@@ -756,7 +756,10 @@ export async function registerApi(app) {
     const { currentPassword, newPassword } = req.body || {};
     const current = await prisma.user.findUnique({ where: { id: u.id } });
     if (!(await verifyPassword(currentPassword, current.passwordHash))) {
-      return reply.code(401).send({ error: 'invalid_current_password' });
+      // 400, not 401: the user IS authenticated, but the currentPassword
+      // body field is wrong. Using 401 caused the frontend's generic
+      // session-expired handler to swallow this case.
+      return reply.code(400).send({ error: 'invalid_current_password' });
     }
     let passwordHash;
     try {
