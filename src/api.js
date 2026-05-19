@@ -298,8 +298,15 @@ export async function registerApi(app) {
     // Pull raw events once and aggregate in JS. Going through Date objects
     // sidesteps SQLite's date-format ambiguity (Prisma 5 stores DateTime as
     // numeric ms), and lets us dedup MessageDelayed by messageToken cleanly.
+    // Operational noise types (DomainDNSError by default) are excluded from
+    // dashboard counts unconditionally — they're not message events.
+    const hidden = hiddenEventTypes();
     const rawEvents = await prisma.event.findMany({
-      where: { mailServerId: { in: mailServerIds }, receivedAt: { gte: since } },
+      where: {
+        mailServerId: { in: mailServerIds },
+        receivedAt: { gte: since },
+        ...(hidden.length > 0 ? { eventType: { notIn: hidden } } : {}),
+      },
       select: { receivedAt: true, eventType: true, messageToken: true },
     });
 
@@ -738,6 +745,16 @@ export async function registerApi(app) {
 
 // --- helpers ------------------------------------------------------------
 
+function hiddenEventTypes() {
+  // Comma-separated env var; default to DomainDNSError which is operational
+  // noise unrelated to message delivery.
+  const raw = process.env.HIDDEN_EVENT_TYPES ?? 'DomainDNSError';
+  return raw
+    .split(',')
+    .map((s) => s.trim())
+    .filter(Boolean);
+}
+
 function webhookUrlFor(token) {
   const host = process.env.HOSTNAME || 'localhost:3000';
   const scheme = host.startsWith('localhost') || host.startsWith('127.0.0.1') ? 'http' : 'https';
@@ -751,7 +768,14 @@ async function buildEventFilter(user, q) {
   if (q.mailServerId && scope.mailServerIds.includes(q.mailServerId)) {
     where.mailServerId = q.mailServerId;
   }
-  if (q.eventType) where.eventType = q.eventType;
+  if (q.eventType) {
+    where.eventType = q.eventType;
+  } else {
+    // Hide noise event types from the default view (still queryable by
+    // explicitly selecting them in the event-type dropdown).
+    const hidden = hiddenEventTypes();
+    if (hidden.length > 0) where.eventType = { notIn: hidden };
+  }
   if (q.bounceType) where.bounceType = q.bounceType;
   if (q.subject) where.subject = { contains: q.subject };
   if (q.mailFrom) where.mailFrom = { contains: q.mailFrom };
