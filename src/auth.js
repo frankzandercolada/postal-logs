@@ -2,6 +2,7 @@ import crypto from 'node:crypto';
 import bcrypt from 'bcryptjs';
 import fastifyRateLimit from '@fastify/rate-limit';
 import { prisma } from './db.js';
+import { logAudit } from './audit.js';
 
 const SESSION_COOKIE = 'pe_sid';
 const SESSION_DAYS = 14;
@@ -37,6 +38,11 @@ export async function registerAuth(app) {
     const hash = user?.passwordHash || '$2a$12$invalidinvalidinvalidinvalidinvalidinvalidinvalidinvalid';
     const ok = await bcrypt.compare(p, hash);
     if (!user || !user.passwordHash || !ok) {
+      await logAudit(req, 'auth.login_failed', {
+        actorEmail: e,
+        targetType: 'user',
+        targetId: user?.id,
+      });
       return reply.code(401).send({ error: 'invalid_credentials' });
     }
 
@@ -45,6 +51,9 @@ export async function registerAuth(app) {
       data: { lastLoginAt: new Date() },
     });
     const session = await createSession(user.id);
+    // Decorate req so audit captures the actor.
+    req.currentUser = user;
+    await logAudit(req, 'auth.login', { targetType: 'user', targetId: user.id });
     return reply
       .setCookie(SESSION_COOKIE, session.id, {
         path: '/',
@@ -61,6 +70,7 @@ export async function registerAuth(app) {
     if (sid) {
       await prisma.session.deleteMany({ where: { id: sid } }).catch(() => {});
     }
+    await logAudit(req, 'auth.logout');
     reply.clearCookie(SESSION_COOKIE, { path: '/' }).send({ ok: true });
   });
 

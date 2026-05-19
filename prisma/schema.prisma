@@ -61,6 +61,7 @@ model User {
 
   memberships   Membership[]
   sessions      Session[]
+  auditLogs     AuditLog[]
 }
 
 model Membership {
@@ -165,4 +166,25 @@ model Suppression {
 
   @@unique([clientId, rcptTo])
   @@index([clientId])
+}
+
+// Append-only record of security- and data-relevant actions: auth events,
+// admin CRUD, CSV exports. The actor relation is SetNull on user delete so
+// the log survives user removal; actorEmail is denormalized for display.
+model AuditLog {
+  id          String   @id @default(cuid())
+  createdAt   DateTime @default(now())
+  actorUserId String?
+  actorEmail  String?
+  action      String   // e.g. "auth.login", "user.delete", "events.export_csv"
+  targetType  String?  // "user" | "client" | "mailserver" | "membership" | "events" | "suppression"
+  targetId    String?
+  meta        String?  // JSON-encoded action-specific details
+  ip          String?
+
+  actor User? @relation(fields: [actorUserId], references: [id], onDelete: SetNull)
+
+  @@index([createdAt])
+  @@index([actorUserId])
+  @@index([action])
 }

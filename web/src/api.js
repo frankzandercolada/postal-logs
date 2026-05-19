@@ -43,11 +43,15 @@ export const api = {
   adminUsers: () => request('/api/admin/users'),
   adminUpsertUser: (data) =>
     request('/api/admin/users', { method: 'POST', body: JSON.stringify(data) }),
+  adminDeleteUser: (userId) =>
+    request(`/api/admin/users/${userId}`, { method: 'DELETE' }),
   adminResetPassword: (userId, password) =>
     request(`/api/admin/users/${userId}/reset-password`, {
       method: 'POST',
       body: JSON.stringify({ password }),
     }),
+  adminAuditLog: (params) =>
+    request('/api/admin/audit-log?' + new URLSearchParams(params).toString()),
   adminUpsertMembership: (data) =>
     request('/api/admin/memberships', { method: 'POST', body: JSON.stringify(data) }),
   adminDeleteMembership: (userId, clientId) =>

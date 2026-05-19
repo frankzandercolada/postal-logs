@@ -7,6 +7,7 @@ import {
   verifyPassword,
   MIN_PASSWORD_LEN,
 } from './auth.js';
+import { logAudit } from './audit.js';
 import { stringify } from 'csv-stringify';
 import { nanoid } from 'nanoid';
 
@@ -166,6 +167,10 @@ export async function registerApi(app) {
     const u = requireAuth(req, reply);
     if (!u) return;
     const where = await buildEventFilter(u, req.query);
+    await logAudit(req, 'events.export_csv', {
+      targetType: 'events',
+      meta: { filters: req.query },
+    });
 
     reply
       .header('Content-Type', 'text/csv; charset=utf-8')
@@ -418,6 +423,10 @@ export async function registerApi(app) {
         ? { in: [clientId].filter((id) => clientIds.includes(id)) }
         : { in: clientIds },
     };
+    await logAudit(req, 'suppression.export_csv', {
+      targetType: 'suppression',
+      meta: { filters: req.query },
+    });
 
     reply
       .header('Content-Type', 'text/csv; charset=utf-8')
@@ -483,7 +492,15 @@ export async function registerApi(app) {
       .toLowerCase()
       .replace(/[^a-z0-9]+/g, '-')
       .replace(/^-|-$/g, '') + '-' + nanoid(6);
-    return prisma.client.create({ data: { name, slug, publicKeyPem: normalizedKey } });
+    const created = await prisma.client.create({
+      data: { name, slug, publicKeyPem: normalizedKey },
+    });
+    await logAudit(req, 'client.create', {
+      targetType: 'client',
+      targetId: created.id,
+      meta: { name, hasKey: !!normalizedKey },
+    });
+    return created;
   });
 
   // Edit the client's default Postal signing key. New mail servers under this
@@ -502,7 +519,13 @@ export async function registerApi(app) {
         data.publicKeyPem = normalizedKey;
       }
     }
-    return prisma.client.update({ where: { id: req.params.id }, data });
+    const updated = await prisma.client.update({ where: { id: req.params.id }, data });
+    await logAudit(req, 'client.update', {
+      targetType: 'client',
+      targetId: req.params.id,
+      meta: { fields: Object.keys(data) },
+    });
+    return updated;
   });
 
   app.delete('/api/admin/clients/:id', async (req, reply) => {
@@ -510,6 +533,10 @@ export async function registerApi(app) {
     await prisma.client.update({
       where: { id: req.params.id },
       data: { archivedAt: new Date() },
+    });
+    await logAudit(req, 'client.archive', {
+      targetType: 'client',
+      targetId: req.params.id,
     });
     return { ok: true };
   });
@@ -544,12 +571,26 @@ export async function registerApi(app) {
         webhookToken: nanoid(32),
       },
     });
+    await logAudit(req, 'mailserver.create', {
+      targetType: 'mailserver',
+      targetId: ms.id,
+      meta: { clientId: req.params.id, name, hasOverrideKey: !!normalizedKey },
+    });
     return { ...ms, webhookUrl: webhookUrlFor(ms.webhookToken) };
   });
 
   app.delete('/api/admin/mail-servers/:id', async (req, reply) => {
     if (!requireStaff(req, reply)) return;
+    const existing = await prisma.mailServer.findUnique({
+      where: { id: req.params.id },
+      select: { name: true, clientId: true },
+    });
     await prisma.mailServer.delete({ where: { id: req.params.id } });
+    await logAudit(req, 'mailserver.delete', {
+      targetType: 'mailserver',
+      targetId: req.params.id,
+      meta: existing || {},
+    });
     return { ok: true };
   });
 
@@ -559,6 +600,10 @@ export async function registerApi(app) {
     const ms = await prisma.mailServer.update({
       where: { id: req.params.id },
       data: { webhookToken: nanoid(32) },
+    });
+    await logAudit(req, 'mailserver.rotate', {
+      targetType: 'mailserver',
+      targetId: ms.id,
     });
     return { ...ms, webhookUrl: webhookUrlFor(ms.webhookToken) };
   });
@@ -630,7 +675,7 @@ export async function registerApi(app) {
         .send({ error: 'password_required', minLength: MIN_PASSWORD_LEN });
     }
 
-    return prisma.user.upsert({
+    const upserted = await prisma.user.upsert({
       where: { email: normalized },
       create: {
         email: normalized,
@@ -644,6 +689,16 @@ export async function registerApi(app) {
         passwordHash: passwordHash || undefined,
       },
     });
+    await logAudit(req, existing ? 'user.update' : 'user.create', {
+      targetType: 'user',
+      targetId: upserted.id,
+      meta: {
+        email: normalized,
+        isStaff: !!isStaff,
+        passwordSet: !!passwordHash,
+      },
+    });
+    return upserted;
   });
 
   // Admin resets a user's password to a value of their choice.
@@ -664,6 +719,33 @@ export async function registerApi(app) {
     });
     // Invalidate all of that user's existing sessions so they re-login.
     await prisma.session.deleteMany({ where: { userId: req.params.id } });
+    await logAudit(req, 'user.reset_password', {
+      targetType: 'user',
+      targetId: req.params.id,
+    });
+    return { ok: true };
+  });
+
+  // Admin removes a user. Cascades drop memberships, scopes, and sessions.
+  // The user's AuditLog rows survive (actorUserId is set null on delete) so
+  // history is preserved.
+  app.delete('/api/admin/users/:id', async (req, reply) => {
+    const me = requireStaff(req, reply);
+    if (!me) return;
+    if (req.params.id === me.id) {
+      return reply.code(400).send({ error: 'cannot_delete_self' });
+    }
+    const target = await prisma.user.findUnique({
+      where: { id: req.params.id },
+      select: { email: true },
+    });
+    if (!target) return reply.code(404).send({ error: 'not_found' });
+    await prisma.user.delete({ where: { id: req.params.id } });
+    await logAudit(req, 'user.delete', {
+      targetType: 'user',
+      targetId: req.params.id,
+      meta: { email: target.email },
+    });
     return { ok: true };
   });
 
@@ -689,6 +771,10 @@ export async function registerApi(app) {
     const sid = req.cookies?.pe_sid;
     await prisma.session.deleteMany({
       where: { userId: u.id, ...(sid ? { NOT: { id: sid } } : {}) },
+    });
+    await logAudit(req, 'user.password_change', {
+      targetType: 'user',
+      targetId: u.id,
     });
     return { ok: true };
   });
@@ -716,8 +802,8 @@ export async function registerApi(app) {
       validated = found.map((m) => m.id);
     }
 
-    return prisma.$transaction(async (tx) => {
-      const membership = await tx.membership.upsert({
+    const membership = await prisma.$transaction(async (tx) => {
+      const m = await tx.membership.upsert({
         where: { userId_clientId: { userId, clientId } },
         create: { userId, clientId, role },
         update: { role },
@@ -730,8 +816,19 @@ export async function registerApi(app) {
           });
         }
       }
-      return membership;
+      return m;
     });
+    await logAudit(req, 'membership.upsert', {
+      targetType: 'membership',
+      targetId: `${userId}:${clientId}`,
+      meta: {
+        userId,
+        clientId,
+        role,
+        ...(wantsScopeUpdate ? { mailServerIds: validated } : {}),
+      },
+    });
+    return membership;
   });
 
   app.delete('/api/admin/memberships/:userId/:clientId', async (req, reply) => {
@@ -739,7 +836,46 @@ export async function registerApi(app) {
     await prisma.membership.delete({
       where: { userId_clientId: { userId: req.params.userId, clientId: req.params.clientId } },
     });
+    await logAudit(req, 'membership.delete', {
+      targetType: 'membership',
+      targetId: `${req.params.userId}:${req.params.clientId}`,
+      meta: { userId: req.params.userId, clientId: req.params.clientId },
+    });
     return { ok: true };
+  });
+
+  // ------------------------------------------------------------------
+  // Audit log read
+  // ------------------------------------------------------------------
+  app.get('/api/admin/audit-log', async (req, reply) => {
+    if (!requireStaff(req, reply)) return;
+    const take = Math.min(parseInt(req.query.limit || '100', 10), 500);
+    const cursor = req.query.cursor || null;
+
+    const where = {};
+    if (req.query.action) where.action = { startsWith: req.query.action };
+    if (req.query.actorEmail) where.actorEmail = { contains: req.query.actorEmail.toLowerCase() };
+    if (req.query.from || req.query.to) {
+      where.createdAt = {};
+      if (req.query.from) where.createdAt.gte = new Date(req.query.from);
+      if (req.query.to) where.createdAt.lte = new Date(req.query.to);
+    }
+
+    const rows = await prisma.auditLog.findMany({
+      where,
+      orderBy: { createdAt: 'desc' },
+      take: take + 1,
+      ...(cursor ? { cursor: { id: cursor }, skip: 1 } : {}),
+    });
+    const hasMore = rows.length > take;
+    const items = (hasMore ? rows.slice(0, take) : rows).map((r) => ({
+      ...r,
+      meta: r.meta ? safeJsonParse(r.meta) : null,
+    }));
+    return {
+      items,
+      nextCursor: hasMore ? items[items.length - 1].id : null,
+    };
   });
 }
 

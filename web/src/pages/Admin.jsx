@@ -2,17 +2,19 @@ import { useEffect, useState } from 'react';
 import { Routes, Route, NavLink } from 'react-router-dom';
 import { api } from '../api.js';
 
-export default function Admin() {
+export default function Admin({ me }) {
   return (
     <div className="space-y-4">
       <h1 className="text-2xl font-semibold">Admin</h1>
       <nav className="flex gap-2 text-sm border-b border-border">
         <SubTab to="/admin">Clients & mail servers</SubTab>
         <SubTab to="/admin/users">Users</SubTab>
+        <SubTab to="/admin/audit-log">Audit log</SubTab>
       </nav>
       <Routes>
         <Route index element={<Clients />} />
-        <Route path="users" element={<Users />} />
+        <Route path="users" element={<Users me={me} />} />
+        <Route path="audit-log" element={<AuditLog />} />
       </Routes>
     </div>
   );
@@ -330,7 +332,7 @@ function MailServerRow({ server: m, revealed, onRotate, onDelete }) {
   );
 }
 
-function Users() {
+function Users({ me }) {
   const [users, setUsers] = useState([]);
   const [clients, setClients] = useState([]);
   const [newUser, setNewUser] = useState({
@@ -392,6 +394,26 @@ function Users() {
   async function toggleStaff(user) {
     await api.adminUpsertUser({ email: user.email, isStaff: !user.isStaff });
     refresh();
+  }
+
+  async function deleteUser(user) {
+    if (
+      !confirm(
+        `Delete ${user.email}? This drops their memberships, scope rows, and sessions. Audit log entries are kept.`,
+      )
+    ) {
+      return;
+    }
+    try {
+      await api.adminDeleteUser(user.id);
+      refresh();
+    } catch (err) {
+      alert(
+        err.message.includes('cannot_delete_self')
+          ? "You can't delete your own account."
+          : 'Delete failed: ' + err.message,
+      );
+    }
   }
 
   return (
@@ -464,6 +486,14 @@ function Users() {
                 className="text-xs px-2 py-1 rounded bg-border hover:bg-border/70"
               >
                 {u.isStaff ? 'demote to regular user' : 'promote to staff'}
+              </button>
+              <button
+                onClick={() => deleteUser(u)}
+                disabled={me?.id === u.id}
+                title={me?.id === u.id ? "you can't delete your own account" : 'delete user'}
+                className="text-xs px-2 py-1 rounded bg-border hover:bg-bad/30 hover:text-bad disabled:opacity-40 disabled:cursor-not-allowed"
+              >
+                delete
               </button>
             </div>
           </div>
@@ -702,5 +732,184 @@ function ResetPasswordForm({ onSubmit, onCancel }) {
         cancel
       </button>
     </form>
+  );
+}
+
+function AuditLog() {
+  const [filters, setFilters] = useState({
+    action: '',
+    actorEmail: '',
+    from: '',
+    to: '',
+  });
+  const [rows, setRows] = useState([]);
+  const [cursor, setCursor] = useState(null);
+  const [hasMore, setHasMore] = useState(false);
+  const [loading, setLoading] = useState(false);
+  const [expanded, setExpanded] = useState(new Set());
+
+  async function load(reset = true) {
+    setLoading(true);
+    try {
+      const params = Object.fromEntries(
+        Object.entries(filters).filter(([, v]) => v),
+      );
+      if (!reset && cursor) params.cursor = cursor;
+      params.limit = 100;
+      const data = await api.adminAuditLog(params);
+      setRows(reset ? data.items : [...rows, ...data.items]);
+      setCursor(data.nextCursor);
+      setHasMore(!!data.nextCursor);
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  useEffect(() => {
+    load(true);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [filters.action, filters.actorEmail, filters.from, filters.to]);
+
+  function toggleMeta(id) {
+    setExpanded((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  }
+
+  return (
+    <div className="space-y-4">
+      <p className="text-sm text-muted">
+        Append-only record of auth events, admin actions, and CSV exports.
+        Actor and IP are captured at the time of the action; the row survives
+        if the user is later deleted.
+      </p>
+
+      <form
+        className="bg-panel border border-border rounded-lg p-4 grid grid-cols-2 md:grid-cols-4 gap-3"
+        onSubmit={(e) => {
+          e.preventDefault();
+          load(true);
+        }}
+      >
+        <input
+          type="search"
+          placeholder="action prefix (e.g. user., events.)"
+          value={filters.action}
+          onChange={(e) => setFilters({ ...filters, action: e.target.value })}
+          className="bg-bg border border-border rounded-md px-3 py-2 text-sm font-mono"
+        />
+        <input
+          type="search"
+          placeholder="actor email contains…"
+          value={filters.actorEmail}
+          onChange={(e) => setFilters({ ...filters, actorEmail: e.target.value })}
+          className="bg-bg border border-border rounded-md px-3 py-2 text-sm"
+        />
+        <input
+          type="date"
+          value={filters.from}
+          onChange={(e) => setFilters({ ...filters, from: e.target.value })}
+          className="bg-bg border border-border rounded-md px-3 py-2 text-sm"
+        />
+        <input
+          type="date"
+          value={filters.to}
+          onChange={(e) => setFilters({ ...filters, to: e.target.value })}
+          className="bg-bg border border-border rounded-md px-3 py-2 text-sm"
+        />
+      </form>
+
+      <div className="bg-panel border border-border rounded-lg overflow-hidden">
+        <div className="overflow-x-auto">
+          <table className="w-full text-sm">
+            <thead className="bg-bg/50 text-xs text-muted">
+              <tr>
+                <th className="text-left font-normal px-3 py-2">When</th>
+                <th className="text-left font-normal px-3 py-2">Actor</th>
+                <th className="text-left font-normal px-3 py-2">Action</th>
+                <th className="text-left font-normal px-3 py-2">Target</th>
+                <th className="text-left font-normal px-3 py-2">IP</th>
+                <th className="text-left font-normal px-3 py-2">Details</th>
+              </tr>
+            </thead>
+            <tbody>
+              {rows.map((r) => (
+                <tr key={r.id} className="border-t border-border align-top">
+                  <td className="px-3 py-2 font-mono text-xs whitespace-nowrap">
+                    {new Date(r.createdAt).toLocaleString()}
+                  </td>
+                  <td className="px-3 py-2 text-xs">
+                    {r.actorEmail || <span className="text-muted">—</span>}
+                    {!r.actorUserId && r.actorEmail && (
+                      <span
+                        className="ml-1 text-[10px] text-muted"
+                        title="The actor account has since been deleted; email is a snapshot."
+                      >
+                        (deleted)
+                      </span>
+                    )}
+                  </td>
+                  <td className="px-3 py-2 font-mono text-xs">{r.action}</td>
+                  <td className="px-3 py-2 text-xs">
+                    {r.targetType ? (
+                      <span className="font-mono">
+                        {r.targetType}
+                        {r.targetId && (
+                          <span className="text-muted">:{r.targetId.slice(0, 12)}</span>
+                        )}
+                      </span>
+                    ) : (
+                      <span className="text-muted">—</span>
+                    )}
+                  </td>
+                  <td className="px-3 py-2 font-mono text-xs text-muted">
+                    {r.ip || '—'}
+                  </td>
+                  <td className="px-3 py-2 text-xs">
+                    {r.meta ? (
+                      <button
+                        onClick={() => toggleMeta(r.id)}
+                        className="text-muted hover:text-ink underline-offset-2 hover:underline"
+                      >
+                        {expanded.has(r.id) ? 'hide' : 'show'}
+                      </button>
+                    ) : (
+                      <span className="text-muted">—</span>
+                    )}
+                    {expanded.has(r.id) && r.meta && (
+                      <pre className="mt-1 text-[11px] bg-bg border border-border rounded p-2 overflow-x-auto whitespace-pre-wrap break-all">
+                        {JSON.stringify(r.meta, null, 2)}
+                      </pre>
+                    )}
+                  </td>
+                </tr>
+              ))}
+              {!loading && rows.length === 0 && (
+                <tr>
+                  <td colSpan={6} className="px-3 py-8 text-center text-muted">
+                    No audit log entries match these filters.
+                  </td>
+                </tr>
+              )}
+            </tbody>
+          </table>
+        </div>
+        <div className="border-t border-border px-3 py-2 flex items-center justify-between text-xs text-muted">
+          <span>{rows.length} shown</span>
+          {hasMore && (
+            <button
+              onClick={() => load(false)}
+              disabled={loading}
+              className="px-3 py-1 rounded bg-border hover:bg-border/70"
+            >
+              {loading ? 'loading…' : 'load more'}
+            </button>
+          )}
+        </div>
+      </div>
+    </div>
   );
 }
